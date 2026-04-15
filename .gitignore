@@ -425,3 +425,5 @@ FodyWeavers.xsd
 
 # dotLLM test model cache
 tests/.models/
+
+.DS_Store
