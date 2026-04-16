@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+rm -R bin
 mkdir bin
 
 clang++ \
@@ -13,3 +14,6 @@ clang++ \
   -framework Metal \
   -o bin/libdotllmmetal.dylib
 
+# Dans build.sh
+xcrun -sdk macosx metal -c add.metal -o bin/add.air
+xcrun -sdk macosx metallib bin/add.air -o add.metallib
