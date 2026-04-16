@@ -18,12 +18,19 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../../Native/metal/add.metal">
+    <None Include="../../Native/metal/*.metal" Link="kernels/*.metal">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>%(Filename)%(Extension)</TargetPath>
     </None>
 
-    <None Include="../../Native/metal/bin/libdotllmmetal.dylib">
+    <None Include="../../Native/metal/bin/*.metallib" Link="kernels/*.metallib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>%(Filename)%(Extension)</TargetPath>
+    </None>
+
+    <None Include="../../Native/metal/bin/libdotllmmetal.dylib" Link="kernels/libdotllmmetal.dylib">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <TargetPath>%(Filename)%(Extension)</TargetPath>
     </None>
   </ItemGroup>
 
