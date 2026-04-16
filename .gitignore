@@ -429,3 +429,5 @@ tests/.models/
 .DS_Store
 
 *.metallib
+
+*.xcuserstate
