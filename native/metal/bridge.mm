@@ -112,6 +112,54 @@ static int run_binary_f32_kernel(
     }
 }
 
+static int run_unary_f32_kernel(
+    dotllm_metal_context* ctx,
+    const char* shaderPath,
+    const char* functionName,
+    const float* a,
+    float* result,
+    uint32_t length)
+{
+    @autoreleasepool {
+        if (!ctx || !a || !result) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, shaderPath, functionName);
+        if (!pipeline) return -3;
+
+        NSUInteger bytes = (NSUInteger)length * sizeof(float);
+        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufR = [ctx->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufL = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+        if (!bufA || !bufR || !bufL) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufA offset:0 atIndex:0];
+        [enc setBuffer:bufR offset:0 atIndex:2];
+        [enc setBuffer:bufL offset:0 atIndex:3];
+
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        if (length > 0 && tgw > length) tgw = length;
+        if (tgw == 0) tgw = 1;
+
+        [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(result, bufR.contents, bytes);
+        return 0;
+    }
+}
+
 extern "C" int dotllm_metal_add_f32(
     dotllm_metal_context* ctx,
     const float* a,
@@ -131,3 +179,13 @@ extern "C" int dotllm_metal_multiply_f32(
 {
     return run_binary_f32_kernel(ctx, "multiply.metal", "multiply_arrays", a, b, result, length);
 }
+
+extern "C" int dotllm_metal_softmax_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    float* result,
+    uint32_t length)
+{
+    return run_unary_f32_kernel(ctx, "softmax.metal", "softmax", input, result, length);
+}
+
