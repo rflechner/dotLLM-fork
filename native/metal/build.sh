@@ -9,11 +9,13 @@ clang++ \
   -shared \
   -fobjc-arc \
   -x objective-c++ \
-  metal_add.mm \
+  bridge.mm \
   -framework Foundation \
   -framework Metal \
   -o bin/libdotllmmetal.dylib
 
-# Dans build.sh
-xcrun -sdk macosx metal -c add.metal -o bin/add.air
-xcrun -sdk macosx metallib bin/add.air -o bin/add.metallib
+for metal_file in *.metal; do
+    name="${metal_file%.metal}"
+    xcrun -sdk macosx metal -c "$metal_file" -o "bin/${name}.air"
+    xcrun -sdk macosx metallib "bin/${name}.air" -o "bin/${name}.metallib"
+done
