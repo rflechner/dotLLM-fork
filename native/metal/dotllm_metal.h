@@ -30,6 +30,14 @@ int dotllm_metal_multiply_f32(
     float* result,
     uint32_t length);
 
+int dotllm_metal_softmax_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    float* result,
+    uint32_t length);
+
+
+
 #ifdef __cplusplus
 }
 #endif
