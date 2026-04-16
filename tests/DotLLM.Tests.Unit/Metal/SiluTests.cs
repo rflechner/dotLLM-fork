@@ -63,10 +63,33 @@ public sealed class SiluTests
         float[] result = new float[5];
         float[] expected = new float[5];
 
+        DotLLM.Cpu.Kernels.SiLu.ExecuteScalar(input, expected);
         using var ctx = new MetalContext();
         Silu.Execute(ctx, input, result);
 
         for (int i = 0; i < input.Length; i++)
             Assert.Equal(expected[i], result[i], 1e-5f);
+    }
+
+    [Fact]
+    public void ScalarMatchesTensorPrimitives()
+    {
+        var rng = new Random(42);
+        const int n = 1024;
+        float[] input = new float[n];
+        for (int i = 0; i < n; i++)
+            input[i] = rng.NextSingle() * 20f - 10f; // range [-10, 10]
+
+        float[] scalarResult = new float[n];
+        float[] simdResult = new float[n];
+
+        DotLLM.Cpu.Kernels.SiLu.ExecuteScalar(input, scalarResult);
+
+        using var ctx = new MetalContext();
+        Silu.Execute(ctx, input, simdResult);
+
+
+        for (int i = 0; i < n; i++)
+            Assert.Equal(scalarResult[i], simdResult[i], 1e-5f);
     }
 }
