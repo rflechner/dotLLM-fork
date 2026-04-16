@@ -16,4 +16,4 @@ clang++ \
 
 # Dans build.sh
 xcrun -sdk macosx metal -c add.metal -o bin/add.air
-xcrun -sdk macosx metallib bin/add.air -o add.metallib
+xcrun -sdk macosx metallib bin/add.air -o bin/add.metallib
