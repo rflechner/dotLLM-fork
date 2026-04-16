@@ -33,10 +33,11 @@ public static class Softmax
             fixed (float* pA = input)
             fixed (float* pR = result)
             {
-                int code = MetalNative.Softmax(ctx.Handle, pA, pR, (uint)input.Length);
+                int code = MetalNative.SoftmaxF32(ctx.Handle, pA, pR, (uint)input.Length);
                 if (code != 0)
                     throw new InvalidOperationException($"Metal multiply_f32 failed with code {code}.");
             }
         }
     }
 }
+

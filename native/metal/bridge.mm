@@ -189,3 +189,22 @@ extern "C" int dotllm_metal_softmax_f32(
     return run_unary_f32_kernel(ctx, "softmax.metal", "softmax", input, result, length);
 }
 
+extern "C" int dotllm_metal_silu_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    float* result,
+    uint32_t length)
+{
+    return run_unary_f32_kernel(ctx, "silu.metal", "silu", input, result, length);
+}
+
+extern "C" int dotllm_metal_swiglu_f32(
+    dotllm_metal_context* ctx,
+    const float* gate,
+    const float* up,
+    float* result,
+    uint32_t length)
+{
+    return run_binary_f32_kernel(ctx, "swiglu.metal", "swiglu", gate, up, result, length);
+}
+

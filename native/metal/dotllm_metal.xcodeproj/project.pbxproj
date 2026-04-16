@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		86D09B9F2F9118AD00449404 /* silu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B9E2F9118AD00449404 /* silu.metal */; };
+		86D09BA12F91265C00449404 /* swiglu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09BA02F91265C00449404 /* swiglu.metal */; };
 		AA000001000000000000001 /* bridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B992F910B2500449404 /* bridge.mm */; };
 		AA000001000000000000002 /* dotllm_metal.h in Headers */ = {isa = PBXBuildFile; fileRef = 86D09B9A2F910B2500449404 /* dotllm_metal.h */; settings = {ATTRIBUTES = (Public, ); }; };
 		AA000001000000000000003 /* add.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B9B2F910BC300449404 /* add.metal */; };
@@ -20,7 +22,9 @@
 		86D09B9B2F910BC300449404 /* add.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = add.metal; sourceTree = "<group>"; };
 		86D09B9C2F910BC300449404 /* multiply.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = multiply.metal; sourceTree = "<group>"; };
 		86D09B9D2F910BC300449404 /* softmax.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = softmax.metal; sourceTree = "<group>"; };
-		AA000001000000000000010 /* libdotllmmetal.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; path = libdotllmmetal.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
+		86D09B9E2F9118AD00449404 /* silu.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = silu.metal; sourceTree = "<group>"; };
+		86D09BA02F91265C00449404 /* swiglu.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = swiglu.metal; sourceTree = "<group>"; };
+		AA000001000000000000010 /* libdotllmmetal.dylib */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.dylib"; includeInIndex = 0; name = libdotllmmetal.dylib; path = dotllmmetal.dylib; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -37,6 +41,8 @@
 		86E449DB2F91082F00C99B43 = {
 			isa = PBXGroup;
 			children = (
+				86D09B9E2F9118AD00449404 /* silu.metal */,
+				86D09BA02F91265C00449404 /* swiglu.metal */,
 				86D09B9B2F910BC300449404 /* add.metal */,
 				86D09B9C2F910BC300449404 /* multiply.metal */,
 				86D09B9D2F910BC300449404 /* softmax.metal */,
@@ -117,9 +123,11 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				86D09BA12F91265C00449404 /* swiglu.metal in Sources */,
 				AA000001000000000000001 /* bridge.mm in Sources */,
 				AA000001000000000000003 /* add.metal in Sources */,
 				AA000001000000000000004 /* multiply.metal in Sources */,
+				86D09B9F2F9118AD00449404 /* silu.metal in Sources */,
 				AA000001000000000000005 /* softmax.metal in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

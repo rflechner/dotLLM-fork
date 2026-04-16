@@ -44,9 +44,24 @@ internal static partial class MetalNative
 
     /// <summary>Softmax activation function: result[i] = exp(input[i]) / sum(exp(input))</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_softmax_f32")]
-    internal static unsafe partial int Softmax(
+    internal static unsafe partial int SoftmaxF32(
         nint ctx,
         float* input,
+        float* result,
+        uint length);
+
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_silu_f32")]
+    internal static unsafe partial int SiluF32(
+        nint ctx,
+        float* input,
+        float* result,
+        uint length);
+
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_swiglu_f32")]
+    internal static unsafe partial int SwigluF32(
+        nint ctx,
+        float* a,
+        float* b,
         float* result,
         uint length);
 
