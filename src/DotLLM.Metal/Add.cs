@@ -1,74 +1,49 @@
-using System;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using DotLLM.Metal.Interop;
 
 namespace DotLLM.Metal;
 
 /// <summary>
-/// Add 2 vectors in parallel on the GPU on Metal.
+/// Element-wise vector addition accelerated via Metal GPU.
 /// </summary>
-public static partial class Add
+public static class Add
 {
     /// <summary>
-    /// Adds two vectors element-wise in parallel using Metal GPU acceleration.
-    /// The result is stored in the provided output span.
+    /// Adds two vectors element-wise: <c>result[i] = a[i] + b[i]</c>.
     /// </summary>
-    /// <param name="a">The first input vector as a read-only span of floats.</param>
-    /// <param name="b">The second input vector as a read-only span of floats.</param>
-    /// <param name="result">
-    /// A span of floats where the result of the addition will be stored.
-    /// Must have a length that is equal to or greater than the length of the input vectors.
-    /// </param>
+    /// <param name="ctx">The Metal context that owns the compiled pipeline.</param>
+    /// <param name="a">First input vector.</param>
+    /// <param name="b">Second input vector.</param>
+    /// <param name="result">Output span. Must be at least as long as <paramref name="a"/>.</param>
     /// <exception cref="ArgumentException">
-    /// Thrown when the input spans <paramref name="a"/> and <paramref name="b"/> do not have the same length,
-    /// or when <paramref name="result"/> does not have sufficient length to store the output.
+    /// Thrown when input lengths differ or <paramref name="result"/> is too short.
     /// </exception>
     /// <exception cref="InvalidOperationException">
-    /// Thrown when the underlying Metal GPU operation fails.
+    /// Thrown when the native Metal kernel returns a non-zero error code.
     /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Execute(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> result)
+    public static void Execute(MetalContext ctx, ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> result)
     {
         if (a.Length != b.Length)
-        {
             throw new ArgumentException("Input spans must have the same length.");
-        }
 
         if (result.Length < a.Length)
-        {
             throw new ArgumentException("Result span is too small.");
-        }
 
         if (a.Length == 0)
-        {
             return;
-        }
 
         unsafe
         {
-            ref float left = ref MemoryMarshal.GetReference(a);
-            ref float right = ref MemoryMarshal.GetReference(b);
-            ref float resultRef = ref MemoryMarshal.GetReference(result);
-            fixed (float* l = &left)
-            fixed (float* r = &right)
-            fixed (float* output = &resultRef)
+            fixed (float* pA = a)
+            fixed (float* pB = b)
+            fixed (float* pR = result)
             {
-                int code = NativeMethods.dotllm_metal_add_f32(l, r, output, (uint)a.Length);
+                int code = MetalNative.AddF32(ctx.Handle, pA, pB, pR, (uint)a.Length);
                 if (code != 0)
-                {
-                    throw new InvalidOperationException($"Metal add failed with code {code}.");
-                }
+                    throw new InvalidOperationException($"Metal add_f32 failed with code {code}.");
             }
         }
-    }
-
-    private static partial class NativeMethods
-    {
-        [LibraryImport("dotllmmetal", EntryPoint = "dotllm_metal_add_f32")]
-        internal static unsafe partial int dotllm_metal_add_f32(
-            float* a,
-            float* b,
-            float* result,
-            uint length);
     }
 }
