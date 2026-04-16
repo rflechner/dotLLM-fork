@@ -30,32 +30,45 @@ public static partial class Add
     public static void Execute(ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> result)
     {
         if (a.Length != b.Length)
+        {
             throw new ArgumentException("Input spans must have the same length.");
+        }
 
         if (result.Length < a.Length)
+        {
             throw new ArgumentException("Result span is too small.");
+        }
 
         if (a.Length == 0)
+        {
             return;
+        }
 
-        var left = a.ToArray();
-        var right = b.ToArray();
-        var output = new float[a.Length];
-
-        var code = NativeMethods.dotllm_metal_add_f32(left, right, output, (uint)a.Length);
-        if (code != 0)
-            throw new InvalidOperationException($"Metal add failed with code {code}.");
-
-        output.CopyTo(result);
+        unsafe
+        {
+            ref float left = ref MemoryMarshal.GetReference(a);
+            ref float right = ref MemoryMarshal.GetReference(b);
+            ref float resultRef = ref MemoryMarshal.GetReference(result);
+            fixed (float* l = &left)
+            fixed (float* r = &right)
+            fixed (float* output = &resultRef)
+            {
+                int code = NativeMethods.dotllm_metal_add_f32(l, r, output, (uint)a.Length);
+                if (code != 0)
+                {
+                    throw new InvalidOperationException($"Metal add failed with code {code}.");
+                }
+            }
+        }
     }
 
     private static partial class NativeMethods
     {
         [LibraryImport("dotllmmetal", EntryPoint = "dotllm_metal_add_f32")]
-        internal static partial int dotllm_metal_add_f32(
-            [In] float[] a,
-            [In] float[] b,
-            [Out] float[] result,
+        internal static unsafe partial int dotllm_metal_add_f32(
+            float* a,
+            float* b,
+            float* result,
             uint length);
     }
 }
