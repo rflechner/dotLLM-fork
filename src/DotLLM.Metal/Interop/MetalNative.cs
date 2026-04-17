@@ -60,9 +60,17 @@ internal static partial class MetalNative
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_swiglu_f32")]
     internal static unsafe partial int SwigluF32(
         nint ctx,
-        float* a,
-        float* b,
+        float* gate,
+        float* up,
         float* result,
         uint length);
 
+    /// <summary>Bias addition (in-place): output[t, i] += bias[i]</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_bias_add_f32")]
+    internal static unsafe partial int BiasAddF32(
+        nint ctx,
+        float* output,
+        float* bias,
+        uint dim,
+        uint seqLen);
 }
