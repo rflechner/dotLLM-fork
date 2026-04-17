@@ -51,6 +51,21 @@ int dotllm_metal_swiglu_f32(
     float* result,
     uint32_t length);
 
+/// Rotary Position Embedding (in-place). Direct translation of rope_f32.cu.
+/// rope_type: 0 = norm/interleaved (Llama/Mistral), 1 = neox/split (Qwen/Phi).
+int dotllm_metal_rope_f32(
+    dotllm_metal_context* ctx,
+    float*         q,
+    float*         k,
+    const int32_t* positions,
+    int32_t        seq_len,
+    int32_t        num_heads,
+    int32_t        num_kv_heads,
+    int32_t        head_dim,
+    int32_t        rope_dim,
+    float          theta,
+    int32_t        rope_type);
+
 /// Bias addition (in-place): output[t, i] += bias[i]  for t in [0, seq_len), i in [0, dim)
 int dotllm_metal_bias_add_f32(
     dotllm_metal_context* ctx,

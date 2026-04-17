@@ -65,6 +65,24 @@ internal static partial class MetalNative
         float* result,
         uint length);
 
+    /// <summary>
+    /// Rotary Position Embedding (in-place). Direct translation of rope_f32.cu.
+    /// ropeType: 0 = norm/interleaved (Llama/Mistral), 1 = neox/split (Qwen/Phi).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_rope_f32")]
+    internal static unsafe partial int RoPEF32(
+        nint   ctx,
+        float* q,
+        float* k,
+        int*   positions,
+        int    seqLen,
+        int    numHeads,
+        int    numKvHeads,
+        int    headDim,
+        int    ropeDim,
+        float  theta,
+        int    ropeType);
+
     /// <summary>Bias addition (in-place): output[t, i] += bias[i]</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_bias_add_f32")]
     internal static unsafe partial int BiasAddF32(
