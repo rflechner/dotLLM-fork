@@ -208,3 +208,65 @@ extern "C" int dotllm_metal_swiglu_f32(
     return run_binary_f32_kernel(ctx, "swiglu.metal", "swiglu", gate, up, result, length);
 }
 
+extern "C" int dotllm_metal_bias_add_f32(
+    dotllm_metal_context* ctx,
+    float* output,
+    const float* bias,
+    uint32_t dim,
+    uint32_t seq_len)
+{
+    @autoreleasepool {
+        if (!ctx || !output || !bias) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "bias_add.metal", "bias_add");
+        if (!pipeline) return -3;
+
+        uint32_t total = dim * seq_len;
+        NSUInteger outputBytes = (NSUInteger)total * sizeof(float);
+        NSUInteger biasBytes   = (NSUInteger)dim  * sizeof(float);
+
+        // output is in-place: wrap the existing host buffer (no copy in)
+        id<MTLBuffer> bufOutput = [ctx->device newBufferWithBytesNoCopy:output
+                                                                  length:outputBytes
+                                                                 options:MTLResourceStorageModeShared
+                                                             deallocator:nil];
+        id<MTLBuffer> bufBias   = [ctx->device newBufferWithBytes:bias
+                                                           length:biasBytes
+                                                          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufDim    = [ctx->device newBufferWithBytes:&dim
+                                                           length:sizeof(uint32_t)
+                                                          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSeqLen = [ctx->device newBufferWithBytes:&seq_len
+                                                           length:sizeof(uint32_t)
+                                                          options:MTLResourceStorageModeShared];
+        if (!bufOutput || !bufBias || !bufDim || !bufSeqLen) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufOutput offset:0 atIndex:0];
+        [enc setBuffer:bufBias   offset:0 atIndex:1];
+        [enc setBuffer:bufDim    offset:0 atIndex:2];
+        [enc setBuffer:bufSeqLen offset:0 atIndex:3];
+
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        if (total > 0 && tgw > total) tgw = total;
+        if (tgw == 0) tgw = 1;
+
+        [enc dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        // output buffer wraps host memory directly — no memcpy needed
+        return 0;
+    }
+}
+

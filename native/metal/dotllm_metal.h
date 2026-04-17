@@ -36,7 +36,28 @@ int dotllm_metal_softmax_f32(
     float* result,
     uint32_t length);
 
+/// SiLU activation: result[i] = input[i] * sigmoid(input[i])
+int dotllm_metal_silu_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    float* result,
+    uint32_t length);
 
+/// SwiGLU: result[i] = gate[i] * sigmoid(gate[i]) * up[i]
+int dotllm_metal_swiglu_f32(
+    dotllm_metal_context* ctx,
+    const float* gate,
+    const float* up,
+    float* result,
+    uint32_t length);
+
+/// Bias addition (in-place): output[t, i] += bias[i]  for t in [0, seq_len), i in [0, dim)
+int dotllm_metal_bias_add_f32(
+    dotllm_metal_context* ctx,
+    float* output,
+    const float* bias,
+    uint32_t dim,
+    uint32_t seq_len);
 
 #ifdef __cplusplus
 }
