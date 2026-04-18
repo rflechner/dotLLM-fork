@@ -91,4 +91,18 @@ internal static partial class MetalNative
         float* bias,
         uint dim,
         uint seqLen);
+
+    /// <summary>
+    /// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i].
+    /// Reduction kernel — one threadgroup per token, NOT element-wise.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_rmsnorm_f32")]
+    internal static unsafe partial int RmsNormF32(
+        nint   ctx,
+        float* input,
+        float* weight,
+        float* output,
+        int    n,
+        int    seqLen,
+        float  eps);
 }

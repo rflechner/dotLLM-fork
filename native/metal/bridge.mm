@@ -349,3 +349,63 @@ extern "C" int dotllm_metal_rope_f32(
     }
 }
 
+extern "C" int dotllm_metal_rmsnorm_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    const float* weight,
+    float*       output,
+    int32_t      n,
+    int32_t      seq_len,
+    float        eps)
+{
+    @autoreleasepool {
+        if (!ctx || !input || !weight || !output) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32");
+        if (!pipeline) return -3;
+
+        // Threadgroup size: up to 256 threads per row.
+        // This kernel uses dispatchThreadgroups (not dispatchThreads) because
+        // the unit of work here is a whole group, not a single thread.
+        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+
+        NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
+        NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
+
+        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:inputBytes               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
+
+        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufIn  offset:0 atIndex:0];
+        [enc setBuffer:bufW   offset:0 atIndex:1];
+        [enc setBuffer:bufOut offset:0 atIndex:2];
+        [enc setBuffer:bufN   offset:0 atIndex:3];
+        [enc setBuffer:bufEps offset:0 atIndex:4];
+
+        // dispatchThreadgroups: launches exactly seq_len groups.
+        // Each group = one token; tgSize threads collaborate on n elements.
+        // Unlike dispatchThreads, this gives explicit control over group count.
+        [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOut.contents, inputBytes);
+        return 0;
+    }
+}
