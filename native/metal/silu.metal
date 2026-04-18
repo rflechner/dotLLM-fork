@@ -1,9 +1,3 @@
-//
-//  silu.metal
-//  dotllm_metal
-//
-//  Created by codeanythingpossible on 16.04.2026.
-//
 
 #include <metal_stdlib>
 using namespace metal;
