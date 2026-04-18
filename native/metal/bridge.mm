@@ -409,3 +409,73 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         return 0;
     }
 }
+
+// Helper shared by both convert kernels.
+// srcElemSize / dstElemSize: sizeof(half)=2, sizeof(float)=4.
+static int run_convert_kernel(
+    dotllm_metal_context* ctx,
+    const char* functionName,
+    const void* src,
+    void*       dst,
+    int32_t     n,
+    size_t      srcElemSize,
+    size_t      dstElemSize)
+{
+    @autoreleasepool {
+        if (!ctx || !src || !dst || n <= 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "convert.metal", functionName);
+        if (!pipeline) return -3;
+
+        NSUInteger srcBytes = (NSUInteger)n * srcElemSize;
+        NSUInteger dstBytes = (NSUInteger)n * dstElemSize;
+
+        id<MTLBuffer> bufSrc = [ctx->device newBufferWithBytes:src length:srcBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufDst = [ctx->device newBufferWithLength:dstBytes           options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        if (!bufSrc || !bufDst || !bufN) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufSrc offset:0 atIndex:0];
+        [enc setBuffer:bufDst offset:0 atIndex:1];
+        [enc setBuffer:bufN   offset:0 atIndex:2];
+
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        if ((NSUInteger)n < tgw) tgw = (NSUInteger)n;
+
+        [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(dst, bufDst.contents, dstBytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_convert_f16_to_f32(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    float*          dst,
+    int32_t         n)
+{
+    return run_convert_kernel(ctx, "convert_f16_to_f32", src, dst, n, sizeof(uint16_t), sizeof(float));
+}
+
+extern "C" int dotllm_metal_convert_f32_to_f16(
+    dotllm_metal_context* ctx,
+    const float* src,
+    uint16_t*    dst,
+    int32_t      n)
+{
+    return run_convert_kernel(ctx, "convert_f32_to_f16", src, dst, n, sizeof(float), sizeof(uint16_t));
+}

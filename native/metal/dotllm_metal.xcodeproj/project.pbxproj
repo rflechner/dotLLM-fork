@@ -10,6 +10,7 @@
 		86B02F532F92AA180094F2E5 /* RoPE.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86B02F522F92AA180094F2E5 /* RoPE.metal */; };
 		86B02F552F92BED80094F2E5 /* rmsnorm.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86B02F542F92BED80094F2E5 /* rmsnorm.metal */; };
 		86B138AA2F91749D00206560 /* bias_add.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86B138A92F91749D00206560 /* bias_add.metal */; };
+		86BD3BE12F93833B00AB9FF5 /* convert.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86BD3BE02F93833B00AB9FF5 /* convert.metal */; };
 		86D09B9F2F9118AD00449404 /* silu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B9E2F9118AD00449404 /* silu.metal */; };
 		86D09BA12F91265C00449404 /* swiglu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09BA02F91265C00449404 /* swiglu.metal */; };
 		AA000001000000000000001 /* bridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B992F910B2500449404 /* bridge.mm */; };
@@ -23,6 +24,7 @@
 		86B02F522F92AA180094F2E5 /* RoPE.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = RoPE.metal; sourceTree = "<group>"; };
 		86B02F542F92BED80094F2E5 /* rmsnorm.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = rmsnorm.metal; sourceTree = "<group>"; };
 		86B138A92F91749D00206560 /* bias_add.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = bias_add.metal; sourceTree = "<group>"; };
+		86BD3BE02F93833B00AB9FF5 /* convert.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = convert.metal; sourceTree = "<group>"; };
 		86D09B992F910B2500449404 /* bridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = bridge.mm; sourceTree = "<group>"; };
 		86D09B9A2F910B2500449404 /* dotllm_metal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dotllm_metal.h; sourceTree = "<group>"; };
 		86D09B9B2F910BC300449404 /* add.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = add.metal; sourceTree = "<group>"; };
@@ -47,6 +49,7 @@
 		86E449DB2F91082F00C99B43 = {
 			isa = PBXGroup;
 			children = (
+				86BD3BE02F93833B00AB9FF5 /* convert.metal */,
 				86B02F542F92BED80094F2E5 /* rmsnorm.metal */,
 				86B02F522F92AA180094F2E5 /* RoPE.metal */,
 				86B138A92F91749D00206560 /* bias_add.metal */,
@@ -137,6 +140,7 @@
 				AA000001000000000000001 /* bridge.mm in Sources */,
 				AA000001000000000000003 /* add.metal in Sources */,
 				86B138AA2F91749D00206560 /* bias_add.metal in Sources */,
+				86BD3BE12F93833B00AB9FF5 /* convert.metal in Sources */,
 				86B02F552F92BED80094F2E5 /* rmsnorm.metal in Sources */,
 				AA000001000000000000004 /* multiply.metal in Sources */,
 				86D09B9F2F9118AD00449404 /* silu.metal in Sources */,
