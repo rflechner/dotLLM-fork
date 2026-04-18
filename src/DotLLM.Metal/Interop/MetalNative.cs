@@ -105,4 +105,20 @@ internal static partial class MetalNative
         int    n,
         int    seqLen,
         float  eps);
+
+    /// <summary>Converts n float16 values to float32. src is passed as ushort* (same bit layout as Half).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f16_to_f32")]
+    internal static unsafe partial int ConvertF16ToF32(
+        nint    ctx,
+        ushort* src,
+        float*  dst,
+        int     n);
+
+    /// <summary>Converts n float32 values to float16. dst is passed as ushort* (same bit layout as Half).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f32_to_f16")]
+    internal static unsafe partial int ConvertF32ToF16(
+        nint    ctx,
+        float*  src,
+        ushort* dst,
+        int     n);
 }

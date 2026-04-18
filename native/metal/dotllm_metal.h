@@ -85,6 +85,22 @@ int dotllm_metal_rmsnorm_f32(
     int32_t      seq_len,
     float        eps);
 
+/// Type conversion: float16 → float32, element-wise.
+/// src and dst must each hold n elements (src: n×2 bytes, dst: n×4 bytes).
+/// uint16_t* is used for half because C has no standard half type.
+int dotllm_metal_convert_f16_to_f32(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    float*          dst,
+    int32_t         n);
+
+/// Type conversion: float32 → float16, element-wise.
+int dotllm_metal_convert_f32_to_f16(
+    dotllm_metal_context* ctx,
+    const float* src,
+    uint16_t*    dst,
+    int32_t      n);
+
 #ifdef __cplusplus
 }
 #endif
