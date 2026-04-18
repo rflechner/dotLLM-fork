@@ -74,6 +74,17 @@ int dotllm_metal_bias_add_f32(
     uint32_t dim,
     uint32_t seq_len);
 
+/// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i]
+/// One threadgroup per token — reduction kernel, NOT element-wise.
+int dotllm_metal_rmsnorm_f32(
+    dotllm_metal_context* ctx,
+    const float* input,
+    const float* weight,
+    float*       output,
+    int32_t      n,
+    int32_t      seq_len,
+    float        eps);
+
 #ifdef __cplusplus
 }
 #endif
