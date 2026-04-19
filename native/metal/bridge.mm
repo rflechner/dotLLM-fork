@@ -689,6 +689,153 @@ extern "C" int dotllm_metal_embedding_q8_0_f32out(
         embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
 }
 
+// ── Dequantization ───────────────────────────────────────────────────────────
+//
+// All dequant kernels share the same buffer layout:
+//   buffer(0) = src  (raw quantized bytes, read-only)
+//   buffer(1) = dst  (output half values)
+//   buffer(2) = total_blocks or total_superblocks (constant int)
+//
+// Two dispatch strategies:
+//   "warp-per-block"  (Q8_0 / Q4_0 / Q5_0): tgw=256, 8 warps/group → nGroups = ceil(total/8)
+//   "thread-per-elem" (Q4_K / Q5_K / Q6_K): tgw=256,  1 group/superblock → nGroups = total
+//
+static int run_dequant_kernel(
+    dotllm_metal_context* ctx,
+    const char*    functionName,
+    const uint8_t* src,
+    NSUInteger     src_bytes,
+    uint16_t*      dst,
+    NSUInteger     dst_bytes,
+    int32_t        total,       // total_blocks or total_superblocks
+    NSUInteger     n_groups,
+    NSUInteger     tgw)
+{
+    @autoreleasepool {
+        if (!ctx || !src || !dst || total <= 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "dequant.metal", functionName);
+        if (!pipeline) return -3;
+
+        id<MTLBuffer> bufSrc   = [ctx->device newBufferWithBytes:src   length:src_bytes          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufDst   = [ctx->device newBufferWithLength:dst_bytes                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufTotal = [ctx->device newBufferWithBytes:&total length:sizeof(int32_t)   options:MTLResourceStorageModeShared];
+        if (!bufSrc || !bufDst || !bufTotal) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufSrc   offset:0 atIndex:0];
+        [enc setBuffer:bufDst   offset:0 atIndex:1];
+        [enc setBuffer:bufTotal offset:0 atIndex:2];
+
+        [enc dispatchThreadgroups:MTLSizeMake(n_groups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(dst, bufDst.contents, dst_bytes);
+        return 0;
+    }
+}
+
+// threads-per-group for all dequant kernels
+static const NSUInteger kDequantTgw = 256;
+// warps-per-group for the warp-per-block kernels (256 threads / 32 per block)
+static const NSUInteger kDequantWarpsPerGroup = 8;
+
+extern "C" int dotllm_metal_dequant_q8_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks)
+{
+    const int32_t BLOCK_BYTES = 34, BLOCK_SIZE = 32;
+    NSUInteger src_bytes = (NSUInteger)total_blocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_blocks * BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = ((NSUInteger)total_blocks + kDequantWarpsPerGroup - 1) / kDequantWarpsPerGroup;
+    return run_dequant_kernel(ctx, "dequant_q8_0_f16",
+        src, src_bytes, dst, dst_bytes, total_blocks, n_groups, kDequantTgw);
+}
+
+extern "C" int dotllm_metal_dequant_q4_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks)
+{
+    const int32_t BLOCK_BYTES = 18, BLOCK_SIZE = 32;
+    NSUInteger src_bytes = (NSUInteger)total_blocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_blocks * BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = ((NSUInteger)total_blocks + kDequantWarpsPerGroup - 1) / kDequantWarpsPerGroup;
+    return run_dequant_kernel(ctx, "dequant_q4_0_f16",
+        src, src_bytes, dst, dst_bytes, total_blocks, n_groups, kDequantTgw);
+}
+
+extern "C" int dotllm_metal_dequant_q5_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks)
+{
+    const int32_t BLOCK_BYTES = 22, BLOCK_SIZE = 32;
+    NSUInteger src_bytes = (NSUInteger)total_blocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_blocks * BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = ((NSUInteger)total_blocks + kDequantWarpsPerGroup - 1) / kDequantWarpsPerGroup;
+    return run_dequant_kernel(ctx, "dequant_q5_0_f16",
+        src, src_bytes, dst, dst_bytes, total_blocks, n_groups, kDequantTgw);
+}
+
+extern "C" int dotllm_metal_dequant_q4_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks)
+{
+    const int32_t BLOCK_BYTES = 144, SUPER_BLOCK_SIZE = 256;
+    NSUInteger src_bytes = (NSUInteger)total_superblocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_superblocks * SUPER_BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = (NSUInteger)total_superblocks; // one group per superblock
+    return run_dequant_kernel(ctx, "dequant_q4_k_f16",
+        src, src_bytes, dst, dst_bytes, total_superblocks, n_groups, kDequantTgw);
+}
+
+extern "C" int dotllm_metal_dequant_q5_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks)
+{
+    const int32_t BLOCK_BYTES = 176, SUPER_BLOCK_SIZE = 256;
+    NSUInteger src_bytes = (NSUInteger)total_superblocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_superblocks * SUPER_BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = (NSUInteger)total_superblocks;
+    return run_dequant_kernel(ctx, "dequant_q5_k_f16",
+        src, src_bytes, dst, dst_bytes, total_superblocks, n_groups, kDequantTgw);
+}
+
+extern "C" int dotllm_metal_dequant_q6_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks)
+{
+    const int32_t BLOCK_BYTES = 210, SUPER_BLOCK_SIZE = 256;
+    NSUInteger src_bytes = (NSUInteger)total_superblocks * BLOCK_BYTES;
+    NSUInteger dst_bytes = (NSUInteger)total_superblocks * SUPER_BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger n_groups  = (NSUInteger)total_superblocks;
+    return run_dequant_kernel(ctx, "dequant_q6_k_f16",
+        src, src_bytes, dst, dst_bytes, total_superblocks, n_groups, kDequantTgw);
+}
+
 extern "C" int dotllm_metal_convert_f16_to_f32(
     dotllm_metal_context* ctx,
     const uint16_t* src,

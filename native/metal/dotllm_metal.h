@@ -142,6 +142,62 @@ int dotllm_metal_embedding_q8_0_f32out(
     int32_t        hidden_size,
     int32_t        seq_len);
 
+// ── Dequantization ───────────────────────────────────────────────────────────
+
+/// Dequantize Q8_0 → FP16.
+/// src layout: total_blocks × 34 bytes (2-byte half scale + 32 int8 weights).
+/// dst layout: total_blocks × 32 halves.
+int dotllm_metal_dequant_q8_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks);
+
+/// Dequantize Q4_0 → FP16.
+/// src layout: total_blocks × 18 bytes (2-byte half scale + 16 packed nibble bytes).
+/// dst layout: total_blocks × 32 halves.
+int dotllm_metal_dequant_q4_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks);
+
+/// Dequantize Q5_0 → FP16.
+/// src layout: total_blocks × 22 bytes (2-byte half scale + 4-byte qh mask + 16 packed nibble bytes).
+/// dst layout: total_blocks × 32 halves.
+int dotllm_metal_dequant_q5_0_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_blocks);
+
+/// Dequantize Q4_K → FP16.
+/// src layout: total_superblocks × 144 bytes.
+/// dst layout: total_superblocks × 256 halves.
+int dotllm_metal_dequant_q4_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks);
+
+/// Dequantize Q5_K → FP16.
+/// src layout: total_superblocks × 176 bytes.
+/// dst layout: total_superblocks × 256 halves.
+int dotllm_metal_dequant_q5_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks);
+
+/// Dequantize Q6_K → FP16.
+/// src layout: total_superblocks × 210 bytes.
+/// dst layout: total_superblocks × 256 halves.
+int dotllm_metal_dequant_q6_k_f16(
+    dotllm_metal_context* ctx,
+    const uint8_t* src,
+    uint16_t*      dst,
+    int32_t        total_superblocks);
+
 /// Type conversion: float16 → float32, element-wise.
 /// src and dst must each hold n elements (src: n×2 bytes, dst: n×4 bytes).
 /// uint16_t* is used for half because C has no standard half type.
