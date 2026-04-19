@@ -523,6 +523,68 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
     }
 }
 
+extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*       residual,
+    const uint16_t* x,
+    const uint16_t* weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps)
+{
+    @autoreleasepool {
+        if (!ctx || !residual || !x || !weight || !output) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "fused_add_rmsnorm.metal", "fused_add_rmsnorm_f16");
+        if (!pipeline) return -3;
+
+        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+
+        NSUInteger rowBytes    = (NSUInteger)n * sizeof(uint16_t);
+        NSUInteger totalBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
+
+        // residual is read AND written by the kernel — copy in, copy out.
+        id<MTLBuffer> bufRes    = [ctx->device newBufferWithBytes:residual length:totalBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufX      = [ctx->device newBufferWithBytes:x        length:totalBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufW      = [ctx->device newBufferWithBytes:weight    length:rowBytes   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut    = [ctx->device newBufferWithLength:totalBytes                 options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN      = [ctx->device newBufferWithBytes:&n       length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps     length:sizeof(float)   options:MTLResourceStorageModeShared];
+
+        if (!bufRes || !bufX || !bufW || !bufOut || !bufN || !bufEps) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufRes  offset:0 atIndex:0];
+        [enc setBuffer:bufX    offset:0 atIndex:1];
+        [enc setBuffer:bufW    offset:0 atIndex:2];
+        [enc setBuffer:bufOut  offset:0 atIndex:3];
+        [enc setBuffer:bufN    offset:0 atIndex:4];
+        [enc setBuffer:bufEps  offset:0 atIndex:5];
+
+        // One threadgroup per token.
+        [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        // residual was updated in-place by the kernel — write back to host.
+        memcpy(residual, bufRes.contents, totalBytes);
+        memcpy(output,   bufOut.contents, totalBytes);
+        return 0;
+    }
+}
+
 extern "C" int dotllm_metal_convert_f16_to_f32(
     dotllm_metal_context* ctx,
     const uint16_t* src,

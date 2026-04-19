@@ -85,6 +85,20 @@ int dotllm_metal_rmsnorm_f32(
     int32_t      seq_len,
     float        eps);
 
+/// Fused residual-add + RMS normalization (FP16).
+/// Pass 1: sum = FP32(residual[i]) + FP32(x[i]); residual[i] = FP16(sum); accumulate sum².
+/// Pass 2: output[i] = FP16(FP32(residual[i]) * rms_inv * FP32(weight[i])).
+/// One threadgroup per token.
+int dotllm_metal_fused_add_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*       residual,
+    const uint16_t* x,
+    const uint16_t* weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps);
+
 /// Per-head RMS Normalization (in-place): for each (token, head), normalizes head_dim elements.
 /// Used by models with QK-norm (Gemma 2, Cohere). One threadgroup per (token × head).
 int dotllm_metal_per_head_rmsnorm_f32(
