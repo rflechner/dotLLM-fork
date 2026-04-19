@@ -121,6 +121,22 @@ internal static partial class MetalNative
         int    seqLen,
         float  eps);
 
+    /// <summary>
+    /// Fused residual-add + RMS normalization (FP16 I/O).
+    /// residual is updated in-place (sum written back as f16); output receives the normalized result.
+    /// All half buffers passed as ushort* (same bit layout as System.Half).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_fused_add_rmsnorm_f16")]
+    internal static unsafe partial int FusedAddRmsNormF16(
+        nint    ctx,
+        ushort* residual,
+        ushort* x,
+        ushort* weight,
+        ushort* output,
+        int     n,
+        int     seqLen,
+        float   eps);
+
     /// <summary>Converts n float16 values to float32. src is passed as ushort* (same bit layout as Half).</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f16_to_f32")]
     internal static unsafe partial int ConvertF16ToF32(
