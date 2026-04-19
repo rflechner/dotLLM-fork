@@ -106,6 +106,21 @@ internal static partial class MetalNative
         int    seqLen,
         float  eps);
 
+    /// <summary>
+    /// Per-head RMS Normalization (in-place).
+    /// For each (token, head), normalizes head_dim elements: vec = vec / rms(vec) * weight.
+    /// One threadgroup per (token × head).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_per_head_rmsnorm_f32")]
+    internal static unsafe partial int PerHeadRmsNormF32(
+        nint   ctx,
+        float* qk,
+        float* weight,
+        int    numHeads,
+        int    headDim,
+        int    seqLen,
+        float  eps);
+
     /// <summary>Converts n float16 values to float32. src is passed as ushort* (same bit layout as Half).</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f16_to_f32")]
     internal static unsafe partial int ConvertF16ToF32(

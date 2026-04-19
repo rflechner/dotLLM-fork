@@ -2,17 +2,17 @@
 using namespace metal;
 
 kernel void per_head_rmsnorm_f32(
-    device float* qk          [[ buffer(0) ]],
-    device float* weight      [[ buffer(1) ]],
+    device float* qk            [[ buffer(0) ]],
+    device const float* weight  [[ buffer(1) ]],
     constant float& eps         [[ buffer(2) ]],
-    constant float& num_heads   [[ buffer(3) ]],
+    constant int& num_heads     [[ buffer(3) ]],
     constant int& head_dim      [[ buffer(4) ]],
     constant int& seq_len       [[ buffer(5) ]],
     
-    uint block_id                   [[ threadgroup_position_in_grid ]],   // blockIdx.x
-    uint threadIdx_x                [[ thread_position_in_threadgroup ]], // threadIdx.x
-    uint blockDim_x                 [[ threads_per_threadgroup ]],        // blockDim.x
-    uint simd_group_width           [[threads_per_simdgroup]])
+    uint block_id               [[ threadgroup_position_in_grid ]],   // blockIdx.x
+    uint threadIdx_x            [[ thread_position_in_threadgroup ]], // threadIdx.x
+    uint blockDim_x             [[ threads_per_threadgroup ]],        // blockDim.x
+    uint simd_group_width       [[threads_per_simdgroup]])
 {
     uint t = block_id / (uint)num_heads;
     uint h = block_id % (uint)num_heads;
@@ -46,7 +46,7 @@ kernel void per_head_rmsnorm_f32(
             sum_sq += simd_shuffle_down(sum_sq, off);
     }
     
-    threadgroup float ri;
+    threadgroup float ri = 0;
     if (threadIdx_x==0)
         ri = rsqrt(sum_sq/(float)head_dim+eps);
     

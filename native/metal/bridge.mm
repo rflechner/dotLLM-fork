@@ -462,6 +462,67 @@ static int run_convert_kernel(
     }
 }
 
+extern "C" int dotllm_metal_per_head_rmsnorm_f32(
+    dotllm_metal_context* ctx,
+    float*       qk,
+    const float* weight,
+    int32_t      num_heads,
+    int32_t      head_dim,
+    int32_t      seq_len,
+    float        eps)
+{
+    @autoreleasepool {
+        if (!ctx || !qk || !weight) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f32");
+        if (!pipeline) return -3;
+
+        uint32_t tgSize   = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        uint32_t nGroups  = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
+
+        NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(float);
+        NSUInteger weightBytes = (NSUInteger)head_dim * sizeof(float);
+
+        // qk is in-place: wrap host memory directly, no copy-in needed.
+        id<MTLBuffer> bufQK     = [ctx->device newBufferWithBytesNoCopy:qk length:qkBytes
+                                      options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> bufWeight = [ctx->device newBufferWithBytes:weight length:weightBytes
+                                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps      length:sizeof(float)   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNH     = [ctx->device newBufferWithBytes:&num_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufHD     = [ctx->device newBufferWithBytes:&head_dim  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSL     = [ctx->device newBufferWithBytes:&seq_len   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+
+        if (!bufQK || !bufWeight || !bufEps || !bufNH || !bufHD || !bufSL) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufQK     offset:0 atIndex:0];
+        [enc setBuffer:bufWeight offset:0 atIndex:1];
+        [enc setBuffer:bufEps    offset:0 atIndex:2];
+        [enc setBuffer:bufNH     offset:0 atIndex:3];
+        [enc setBuffer:bufHD     offset:0 atIndex:4];
+        [enc setBuffer:bufSL     offset:0 atIndex:5];
+
+        // One threadgroup per (token, head) pair.
+        [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+        // bufQK wraps host memory directly — no memcpy needed.
+        return 0;
+    }
+}
+
 extern "C" int dotllm_metal_convert_f16_to_f32(
     dotllm_metal_context* ctx,
     const uint16_t* src,
