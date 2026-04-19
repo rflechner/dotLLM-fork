@@ -172,6 +172,56 @@ internal static partial class MetalNative
         int    hiddenSize,
         int    seqLen);
 
+    // ── Dequantization ────────────────────────────────────────────────────────────
+
+    /// <summary>Dequantize Q8_0 → FP16. src: total_blocks × 34 bytes. dst: total_blocks × 32 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q8_0_f16")]
+    internal static unsafe partial int DequantQ8_0F16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalBlocks);
+
+    /// <summary>Dequantize Q4_0 → FP16. src: total_blocks × 18 bytes. dst: total_blocks × 32 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q4_0_f16")]
+    internal static unsafe partial int DequantQ4_0F16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalBlocks);
+
+    /// <summary>Dequantize Q5_0 → FP16. src: total_blocks × 22 bytes. dst: total_blocks × 32 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q5_0_f16")]
+    internal static unsafe partial int DequantQ5_0F16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalBlocks);
+
+    /// <summary>Dequantize Q4_K → FP16. src: total_superblocks × 144 bytes. dst: total_superblocks × 256 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q4_k_f16")]
+    internal static unsafe partial int DequantQ4_KF16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalSuperblocks);
+
+    /// <summary>Dequantize Q5_K → FP16. src: total_superblocks × 176 bytes. dst: total_superblocks × 256 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q5_k_f16")]
+    internal static unsafe partial int DequantQ5_KF16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalSuperblocks);
+
+    /// <summary>Dequantize Q6_K → FP16. src: total_superblocks × 210 bytes. dst: total_superblocks × 256 halves (as ushort).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_dequant_q6_k_f16")]
+    internal static unsafe partial int DequantQ6_KF16(
+        nint    ctx,
+        byte*   src,
+        ushort* dst,
+        int     totalSuperblocks);
+
     /// <summary>Converts n float16 values to float32. src is passed as ushort* (same bit layout as Half).</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f16_to_f32")]
     internal static unsafe partial int ConvertF16ToF32(
