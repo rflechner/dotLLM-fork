@@ -49,6 +49,31 @@ public sealed class DequantTests
         }
     }
 
+    // ── Inline CPU reference for formats not covered by Dequantize.ToFloat32 ──
+
+    /// <summary>
+    /// Q4_0 scalar reference — not yet implemented in <see cref="Dequantize.ToFloat32"/>.
+    /// Layout: 18 bytes = 2-byte half scale + 16 packed nibble bytes.
+    /// Element order: out[2j] = lo nibble of qs[j] − 8, out[2j+1] = hi nibble of qs[j] − 8.
+    /// </summary>
+    private static float[] CpuQ4_0(byte[] src, int totalBlocks)
+    {
+        const int BlockSize = 32, BlockBytes = 18;
+        float[] out_ = new float[totalBlocks * BlockSize];
+        for (int b = 0; b < totalBlocks; b++)
+        {
+            int off = b * BlockBytes;
+            float d = (float)MemoryMarshal.Read<Half>(src.AsSpan(off, 2));
+            for (int lane = 0; lane < BlockSize; lane++)
+            {
+                byte packed = src[off + 2 + lane / 2];
+                int val = (lane & 1) != 0 ? ((packed >> 4) - 8) : ((packed & 0x0F) - 8);
+                out_[b * BlockSize + lane] = d * val;
+            }
+        }
+        return out_;
+    }
+
     // ── Data builders ─────────────────────────────────────────────────────────
 
     private static byte[] RandomBytes(int byteCount, int seed)
@@ -162,7 +187,7 @@ public sealed class DequantTests
     {
         const int blocks = 1, elems = blocks * 32;
         byte[]  src      = BuildBlocks(blocks, 18, scaleOffset: 0, seed: 10);
-        float[] expected = CpuDequant(src, elems, QuantizationType.Q4_0);
+        float[] expected = CpuQ4_0(src, blocks);
         Half[]  dst      = new Half[elems];
 
         using var ctx = new MetalContext();
@@ -176,7 +201,7 @@ public sealed class DequantTests
     {
         const int blocks = 12, elems = blocks * 32;
         byte[]  src      = BuildBlocks(blocks, 18, scaleOffset: 0, seed: 11);
-        float[] expected = CpuDequant(src, elems, QuantizationType.Q4_0);
+        float[] expected = CpuQ4_0(src, blocks);
         Half[]  dst      = new Half[elems];
 
         using var ctx = new MetalContext();
