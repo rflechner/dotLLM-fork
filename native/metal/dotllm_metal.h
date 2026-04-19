@@ -110,6 +110,38 @@ int dotllm_metal_per_head_rmsnorm_f32(
     int32_t      seq_len,
     float        eps);
 
+/// Embedding lookup — FP32 table → FP32 output.
+/// output[t] = embed_table[token_ids[t]]  (hidden_size floats copied per token).
+int dotllm_metal_embedding_f32_f32out(
+    dotllm_metal_context* ctx,
+    const float* embed_table,
+    const int32_t* token_ids,
+    float*         output,
+    int32_t        vocab_size,
+    int32_t        hidden_size,
+    int32_t        seq_len);
+
+/// Embedding lookup — FP16 table → FP32 output (cast on the fly).
+int dotllm_metal_embedding_f16_f32out(
+    dotllm_metal_context* ctx,
+    const uint16_t* embed_table,
+    const int32_t*  token_ids,
+    float*          output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len);
+
+/// Embedding lookup — Q8_0 quantized table → FP32 output (dequantize on the fly).
+/// embed_table layout: blocks of Q8_0_BLOCK_BYTES (2-byte half scale + 32 int8 values).
+int dotllm_metal_embedding_q8_0_f32out(
+    dotllm_metal_context* ctx,
+    const uint8_t* embed_table,
+    const int32_t* token_ids,
+    float*         output,
+    int32_t        vocab_size,
+    int32_t        hidden_size,
+    int32_t        seq_len);
+
 /// Type conversion: float16 → float32, element-wise.
 /// src and dst must each hold n elements (src: n×2 bytes, dst: n×4 bytes).
 /// uint16_t* is used for half because C has no standard half type.

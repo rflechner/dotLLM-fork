@@ -137,6 +137,41 @@ internal static partial class MetalNative
         int     seqLen,
         float   eps);
 
+    // ── Embedding lookup ──────────────────────────────────────────────────────
+
+    /// <summary>Embedding lookup: FP32 table → FP32 output.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_f32_f32out")]
+    internal static unsafe partial int EmbeddingF32F32Out(
+        nint   ctx,
+        float* embedTable,
+        int*   tokenIds,
+        float* output,
+        int    vocabSize,
+        int    hiddenSize,
+        int    seqLen);
+
+    /// <summary>Embedding lookup: FP16 table → FP32 output. embedTable passed as ushort*.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_f16_f32out")]
+    internal static unsafe partial int EmbeddingF16F32Out(
+        nint    ctx,
+        ushort* embedTable,
+        int*    tokenIds,
+        float*  output,
+        int     vocabSize,
+        int     hiddenSize,
+        int     seqLen);
+
+    /// <summary>Embedding lookup: Q8_0 quantized table → FP32 output (dequantize on the fly).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_q8_0_f32out")]
+    internal static unsafe partial int EmbeddingQ8_0F32Out(
+        nint   ctx,
+        byte*  embedTable,
+        int*   tokenIds,
+        float* output,
+        int    vocabSize,
+        int    hiddenSize,
+        int    seqLen);
+
     /// <summary>Converts n float16 values to float32. src is passed as ushort* (same bit layout as Half).</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_convert_f16_to_f32")]
     internal static unsafe partial int ConvertF16ToF32(
