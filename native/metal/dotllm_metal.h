@@ -85,6 +85,17 @@ int dotllm_metal_rmsnorm_f32(
     int32_t      seq_len,
     float        eps);
 
+/// Per-head RMS Normalization (in-place): for each (token, head), normalizes head_dim elements.
+/// Used by models with QK-norm (Gemma 2, Cohere). One threadgroup per (token × head).
+int dotllm_metal_per_head_rmsnorm_f32(
+    dotllm_metal_context* ctx,
+    float*       qk,
+    const float* weight,
+    int32_t      num_heads,
+    int32_t      head_dim,
+    int32_t      seq_len,
+    float        eps);
+
 /// Type conversion: float16 → float32, element-wise.
 /// src and dst must each hold n elements (src: n×2 bytes, dst: n×4 bytes).
 /// uint16_t* is used for half because C has no standard half type.
