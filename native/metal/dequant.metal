@@ -213,16 +213,17 @@ kernel void dequant_q5_k_f16(
         float scale = d * (float)sc;
         float min_val = dmin * (float)m;
 
+        // NOTE: this qs/qh access pattern is a direct port of the CUDA kernel.
+        // It does NOT match the CPU scalar reference (DequantizeQ5_KScalar).
+        // A potential bug exists in the original CUDA implementation and will be fixed
+        // for both backends (CUDA + Metal) in a dedicated follow-up PR.
         device const uchar* sub_qs = qs + sub * 16;
         device const uchar* sub_qh = qh + sub * 4;
 
-        // pos 0..31: interleaved low/high nibbles
-        // sub_out[2*j+0]=lo, sub_out[2*j+1]=hi for j=0..15
         int j = pos / 2;
         uint8_t packed = sub_qs[j];
         int nibble = (pos & 1) ? (packed >> 4) : (packed & 0x0F);
 
-        // Extract 5th bit from qh
         int bit = (sub_qh[j / 4] >> ((j % 4) * 2 + (pos & 1))) & 1;
         int val = nibble | (bit << 4);
 
