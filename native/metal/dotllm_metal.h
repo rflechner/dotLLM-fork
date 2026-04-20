@@ -142,6 +142,46 @@ int dotllm_metal_embedding_q8_0_f32out(
     int32_t        hidden_size,
     int32_t        seq_len);
 
+// ── Attention ────────────────────────────────────────────────────────────────
+
+/// Tiled scaled dot-product attention: FP16 Q/K/V/output, FP32 accumulation.
+/// Same algorithm and layout as dotllm_metal_attention_f32 — only the dtype differs.
+/// Output is written as FP16 (float → half truncation on store).
+int dotllm_metal_attention_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* q,
+    const uint16_t* k,
+    const uint16_t* v,
+    uint16_t*       output,
+    int32_t         seq_q,
+    int32_t         seq_kv,
+    int32_t         num_heads,
+    int32_t         num_kv_heads,
+    int32_t         head_dim,
+    int32_t         position_offset,
+    int32_t         sliding_window);
+
+/// Tiled scaled dot-product attention with online softmax and GQA support.
+/// Q layout: [seq_q,  num_heads    * head_dim] — FP32.
+/// K layout: [seq_kv, num_kv_heads * head_dim] — FP32.
+/// V layout: [seq_kv, num_kv_heads * head_dim] — FP32.
+/// Output:   [seq_q,  num_heads    * head_dim] — FP32.
+/// position_offset: 0 for prefill; cached token count for decode.
+/// sliding_window:  0 means full causal attention (no window limit).
+int dotllm_metal_attention_f32(
+    dotllm_metal_context* ctx,
+    const float* q,
+    const float* k,
+    const float* v,
+    float*       output,
+    int32_t      seq_q,
+    int32_t      seq_kv,
+    int32_t      num_heads,
+    int32_t      num_kv_heads,
+    int32_t      head_dim,
+    int32_t      position_offset,
+    int32_t      sliding_window);
+
 // ── KV-cache quantization ────────────────────────────────────────────────────
 
 /// FP16 → Q8_0 quantization (KV-cache eviction).
