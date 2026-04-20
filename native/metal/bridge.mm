@@ -689,6 +689,139 @@ extern "C" int dotllm_metal_embedding_q8_0_f32out(
         embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
 }
 
+// ── Attention ────────────────────────────────────────────────────────────────
+//
+// Shared dispatch helper: both f16 and f32 variants use the same layout,
+// the only difference is element size and shader name.
+//
+static int run_attention_kernel(
+    dotllm_metal_context* ctx,
+    const char*  functionName,
+    const void*  q,
+    const void*  k,
+    const void*  v,
+    void*        output,
+    size_t       elemSize,   // sizeof(float) or sizeof(uint16_t)
+    int32_t      seq_q,
+    int32_t      seq_kv,
+    int32_t      num_heads,
+    int32_t      num_kv_heads,
+    int32_t      head_dim,
+    int32_t      position_offset,
+    int32_t      sliding_window)
+{
+    @autoreleasepool {
+        if (!ctx || !q || !k || !v || !output) return -10;
+        if (seq_q <= 0 || seq_kv <= 0 || num_heads <= 0 || num_kv_heads <= 0
+            || head_dim <= 0 || num_heads % num_kv_heads != 0) return -10;
+
+        NSString* shaderFile = [NSString stringWithFormat:@"attention_%s.metal",
+                                (elemSize == sizeof(float)) ? "f32" : "f16"];
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, shaderFile.UTF8String, functionName);
+        if (!pipeline) return -3;
+
+        NSUInteger qBytes      = (NSUInteger)(seq_q  * num_heads    * head_dim) * elemSize;
+        NSUInteger kvBytes     = (NSUInteger)(seq_kv * num_kv_heads * head_dim) * elemSize;
+        NSUInteger outputBytes = qBytes;
+
+        id<MTLBuffer> bufQ   = [ctx->device newBufferWithBytes:q      length:qBytes      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufK   = [ctx->device newBufferWithBytes:k      length:kvBytes     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufV   = [ctx->device newBufferWithBytes:v      length:kvBytes     options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outputBytes               options:MTLResourceStorageModeShared];
+
+        id<MTLBuffer> bufSeqQ    = [ctx->device newBufferWithBytes:&seq_q           length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSeqKV   = [ctx->device newBufferWithBytes:&seq_kv          length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNH      = [ctx->device newBufferWithBytes:&num_heads       length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNKV     = [ctx->device newBufferWithBytes:&num_kv_heads    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufHD      = [ctx->device newBufferWithBytes:&head_dim        length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufPosOff  = [ctx->device newBufferWithBytes:&position_offset length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSlide   = [ctx->device newBufferWithBytes:&sliding_window  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+
+        if (!bufQ || !bufK || !bufV || !bufOut ||
+            !bufSeqQ || !bufSeqKV || !bufNH || !bufNKV ||
+            !bufHD || !bufPosOff || !bufSlide) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufQ      offset:0 atIndex:0];
+        [enc setBuffer:bufK      offset:0 atIndex:1];
+        [enc setBuffer:bufV      offset:0 atIndex:2];
+        [enc setBuffer:bufOut    offset:0 atIndex:3];
+        [enc setBuffer:bufSeqQ   offset:0 atIndex:4];
+        [enc setBuffer:bufSeqKV  offset:0 atIndex:5];
+        [enc setBuffer:bufNH     offset:0 atIndex:6];
+        [enc setBuffer:bufNKV    offset:0 atIndex:7];
+        [enc setBuffer:bufHD     offset:0 atIndex:8];
+        [enc setBuffer:bufPosOff offset:0 atIndex:9];
+        [enc setBuffer:bufSlide  offset:0 atIndex:10];
+
+        // Dynamic threadgroup memory:
+        //   q_shared(head_dim) + score_tile(256) + out_accum(head_dim) + warp_scratch(8)
+        const int TILE_KV = 256;
+        NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
+        [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
+
+        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
+        [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOut.contents, outputBytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_attention_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* q,
+    const uint16_t* k,
+    const uint16_t* v,
+    uint16_t*       output,
+    int32_t         seq_q,
+    int32_t         seq_kv,
+    int32_t         num_heads,
+    int32_t         num_kv_heads,
+    int32_t         head_dim,
+    int32_t         position_offset,
+    int32_t         sliding_window)
+{
+    return run_attention_kernel(ctx, "attention_f16",
+        q, k, v, output, sizeof(uint16_t),
+        seq_q, seq_kv, num_heads, num_kv_heads, head_dim,
+        position_offset, sliding_window);
+}
+
+extern "C" int dotllm_metal_attention_f32(
+    dotllm_metal_context* ctx,
+    const float* q,
+    const float* k,
+    const float* v,
+    float*       output,
+    int32_t      seq_q,
+    int32_t      seq_kv,
+    int32_t      num_heads,
+    int32_t      num_kv_heads,
+    int32_t      head_dim,
+    int32_t      position_offset,
+    int32_t      sliding_window)
+{
+    return run_attention_kernel(ctx, "attention_f32",
+        q, k, v, output, sizeof(float),
+        seq_q, seq_kv, num_heads, num_kv_heads, head_dim,
+        position_offset, sliding_window);
+}
+
 // ── KV-cache quantization ────────────────────────────────────────────────────
 //
 // Both quant kernels share the same buffer layout:

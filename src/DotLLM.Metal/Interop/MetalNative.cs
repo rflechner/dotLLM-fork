@@ -172,6 +172,40 @@ internal static partial class MetalNative
         int    hiddenSize,
         int    seqLen);
 
+    // ── Attention ─────────────────────────────────────────────────────────────────
+
+    /// <summary>FP16 Q/K/V/output attention. Buffers passed as ushort* (same layout as Half).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_attention_f16")]
+    internal static unsafe partial int AttentionF16(
+        nint    ctx,
+        ushort* q,
+        ushort* k,
+        ushort* v,
+        ushort* output,
+        int     seqQ,
+        int     seqKv,
+        int     numHeads,
+        int     numKvHeads,
+        int     headDim,
+        int     positionOffset,
+        int     slidingWindow);
+
+    /// <summary>FP32 Q/K/V/output attention.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_attention_f32")]
+    internal static unsafe partial int AttentionF32(
+        nint   ctx,
+        float* q,
+        float* k,
+        float* v,
+        float* output,
+        int    seqQ,
+        int    seqKv,
+        int    numHeads,
+        int    numKvHeads,
+        int    headDim,
+        int    positionOffset,
+        int    slidingWindow);
+
     // ── KV-cache quantization ─────────────────────────────────────────────────────
 
     /// <summary>FP16 → Q8_0. src: total_blocks × 32 halves (as ushort). dst: total_blocks × 34 bytes.</summary>
