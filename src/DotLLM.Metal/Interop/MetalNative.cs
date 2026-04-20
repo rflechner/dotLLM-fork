@@ -172,6 +172,39 @@ internal static partial class MetalNative
         int    hiddenSize,
         int    seqLen);
 
+    // ── KV-cache quantization ─────────────────────────────────────────────────────
+
+    /// <summary>FP16 → Q8_0. src: total_blocks × 32 halves (as ushort). dst: total_blocks × 34 bytes.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quant_f16_to_q8_0")]
+    internal static unsafe partial int QuantF16ToQ8_0(
+        nint    ctx,
+        ushort* src,
+        byte*   dst,
+        int     totalBlocks);
+
+    /// <summary>FP16 → Q4_0. src: total_blocks × 32 halves (as ushort). dst: total_blocks × 18 bytes.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quant_f16_to_q4_0")]
+    internal static unsafe partial int QuantF16ToQ4_0(
+        nint    ctx,
+        ushort* src,
+        byte*   dst,
+        int     totalBlocks);
+
+    // ── Quantized GEMV ───────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Quantized GEMV: y[i] = dot(dequant(W_q8_0[i,:]), x) for i in [0, n).
+    /// weight layout: n × (k/32) blocks × 34 bytes. k must be a multiple of 32.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q8_0_f32in")]
+    internal static unsafe partial int QuantizedGemvQ8_0F32In(
+        nint   ctx,
+        byte*  weight,
+        float* x,
+        float* y,
+        int    n,
+        int    k);
+
     // ── Dequantization ────────────────────────────────────────────────────────────
 
     /// <summary>Dequantize Q8_0 → FP16. src: total_blocks × 34 bytes. dst: total_blocks × 32 halves (as ushort).</summary>

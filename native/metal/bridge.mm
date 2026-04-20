@@ -689,6 +689,152 @@ extern "C" int dotllm_metal_embedding_q8_0_f32out(
         embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
 }
 
+// ── KV-cache quantization ────────────────────────────────────────────────────
+//
+// Both quant kernels share the same buffer layout:
+//   buffer(0) = src  (FP16 input, read-only, passed as uint16_t*)
+//   buffer(1) = dst  (quantized output bytes)
+//   buffer(2) = total_blocks (constant int)
+//
+// Dispatch: one thread per block → dispatchThreads(total_blocks, 1, 1).
+//
+static int run_quant_kv_kernel(
+    dotllm_metal_context* ctx,
+    const char*      functionName,
+    const uint16_t*  src,
+    NSUInteger       src_bytes,
+    uint8_t*         dst,
+    NSUInteger       dst_bytes,
+    int32_t          total_blocks)
+{
+    @autoreleasepool {
+        if (!ctx || !src || !dst || total_blocks <= 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "quant_kv.metal", functionName);
+        if (!pipeline) return -3;
+
+        id<MTLBuffer> bufSrc   = [ctx->device newBufferWithBytes:src   length:src_bytes          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufDst   = [ctx->device newBufferWithLength:dst_bytes                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufTotal = [ctx->device newBufferWithBytes:&total_blocks length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        if (!bufSrc || !bufDst || !bufTotal) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufSrc   offset:0 atIndex:0];
+        [enc setBuffer:bufDst   offset:0 atIndex:1];
+        [enc setBuffer:bufTotal offset:0 atIndex:2];
+
+        // One thread per quantization block.
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        if ((NSUInteger)total_blocks < tgw) tgw = (NSUInteger)total_blocks;
+        if (tgw == 0) tgw = 1;
+
+        [enc dispatchThreads:MTLSizeMake(total_blocks, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(dst, bufDst.contents, dst_bytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_quant_f16_to_q8_0(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    uint8_t*        dst,
+    int32_t         total_blocks)
+{
+    const int32_t BLOCK_SIZE  = 32;
+    const int32_t BLOCK_BYTES = 34;
+    NSUInteger src_bytes = (NSUInteger)total_blocks * BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger dst_bytes = (NSUInteger)total_blocks * BLOCK_BYTES;
+    return run_quant_kv_kernel(ctx, "quant_f16_to_q8_0",
+        src, src_bytes, dst, dst_bytes, total_blocks);
+}
+
+extern "C" int dotllm_metal_quant_f16_to_q4_0(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    uint8_t*        dst,
+    int32_t         total_blocks)
+{
+    const int32_t BLOCK_SIZE  = 32;
+    const int32_t BLOCK_BYTES = 18;
+    NSUInteger src_bytes = (NSUInteger)total_blocks * BLOCK_SIZE * sizeof(uint16_t);
+    NSUInteger dst_bytes = (NSUInteger)total_blocks * BLOCK_BYTES;
+    return run_quant_kv_kernel(ctx, "quant_f16_to_q4_0",
+        src, src_bytes, dst, dst_bytes, total_blocks);
+}
+
+// ── Quantized GEMV ───────────────────────────────────────────────────────────
+
+extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
+    dotllm_metal_context* ctx,
+    const uint8_t* weight,
+    const float*   x,
+    float*         y,
+    int32_t        n,
+    int32_t        k)
+{
+    @autoreleasepool {
+        if (!ctx || !weight || !x || !y || n <= 0 || k <= 0 || k % 32 != 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "quantized_gemv_f32in.metal",
+                                       "quantized_gemv_q8_0_f32in");
+        if (!pipeline) return -3;
+
+        // weight: n rows × (k/32) blocks × 34 bytes
+        int32_t bpr = k / 32;
+        NSUInteger weightBytes = (NSUInteger)n * bpr * 34;
+        NSUInteger xBytes      = (NSUInteger)k * sizeof(float);
+        NSUInteger yBytes      = (NSUInteger)n * sizeof(float);
+
+        id<MTLBuffer> bufW = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufX = [ctx->device newBufferWithBytes:x      length:xBytes      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufY = [ctx->device newBufferWithLength:yBytes                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufK = [ctx->device newBufferWithBytes:&k length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        if (!bufW || !bufX || !bufY || !bufN || !bufK) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufW offset:0 atIndex:0];
+        [enc setBuffer:bufX offset:0 atIndex:1];
+        [enc setBuffer:bufY offset:0 atIndex:2];
+        [enc setBuffer:bufN offset:0 atIndex:3];
+        [enc setBuffer:bufK offset:0 atIndex:4];
+
+        // One threadgroup per output row; 256 threads per group.
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(y, bufY.contents, yBytes);
+        return 0;
+    }
+}
+
 // ── Dequantization ───────────────────────────────────────────────────────────
 //
 // All dequant kernels share the same buffer layout:
