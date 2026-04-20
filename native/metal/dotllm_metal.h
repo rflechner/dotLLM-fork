@@ -142,6 +142,40 @@ int dotllm_metal_embedding_q8_0_f32out(
     int32_t        hidden_size,
     int32_t        seq_len);
 
+// ── KV-cache quantization ────────────────────────────────────────────────────
+
+/// FP16 → Q8_0 quantization (KV-cache eviction).
+/// src: total_blocks × 32 half values.
+/// dst: total_blocks × 34 bytes (2-byte half scale + 32 int8 values).
+int dotllm_metal_quant_f16_to_q8_0(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    uint8_t*        dst,
+    int32_t         total_blocks);
+
+/// FP16 → Q4_0 quantization (KV-cache eviction).
+/// src: total_blocks × 32 half values.
+/// dst: total_blocks × 18 bytes (2-byte half scale + 16 packed nibble bytes).
+int dotllm_metal_quant_f16_to_q4_0(
+    dotllm_metal_context* ctx,
+    const uint16_t* src,
+    uint8_t*        dst,
+    int32_t         total_blocks);
+
+// ── Quantized GEMV ───────────────────────────────────────────────────────────
+
+/// Quantized GEMV: y[i] = dot(dequant(W_q8_0[i,:]), x)  for i in [0, n).
+/// weight layout: n rows × (k/32) blocks × 34 bytes per block.
+/// x: float32 input vector, length k. y: float32 output vector, length n.
+/// k must be a multiple of 32.
+int dotllm_metal_quantized_gemv_q8_0_f32in(
+    dotllm_metal_context* ctx,
+    const uint8_t* weight,
+    const float*   x,
+    float*         y,
+    int32_t        n,
+    int32_t        k);
+
 // ── Dequantization ───────────────────────────────────────────────────────────
 
 /// Dequantize Q8_0 → FP16.
