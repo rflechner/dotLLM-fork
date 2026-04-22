@@ -278,7 +278,7 @@ extern "C" int dotllm_metal_multiply_f32(
     float* result,
     uint32_t length)
 {
-    return run_binary_f32_kernel(ctx, "multiply.metal", "multiply_arrays", a, b, result, length);
+    return run_binary_f32_kernel(ctx, "multiply.metal", "multiply_f32", a, b, result, length);
 }
 
 extern "C" int dotllm_metal_softmax_f16(
