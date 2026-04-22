@@ -41,7 +41,7 @@ public static class Swiglu
             {
                 int code = MetalNative.SwigluF32(ctx.Handle, pA, pB, pR, (uint)a.Length);
                 if (code != 0)
-                    throw new InvalidOperationException($"Metal add_f32 failed with code {code}.");
+                    throw new InvalidOperationException($"Metal swiglu_f32 failed with code {code}.");
             }
         }
     }

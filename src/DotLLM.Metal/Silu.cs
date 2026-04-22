@@ -36,7 +36,7 @@ public static class Silu
             {
                 int code = MetalNative.SiluF32(ctx.Handle, pInput, pR, (uint)input.Length);
                 if (code != 0)
-                    throw new InvalidOperationException($"Metal add_f32 failed with code {code}.");
+                    throw new InvalidOperationException($"Metal silu_f32 failed with code {code}.");
             }
         }
     }
