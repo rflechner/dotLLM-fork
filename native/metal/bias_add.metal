@@ -1,16 +1,55 @@
+// Bias addition kernels for dotLLM.
+// ISO port of bias_add_f32.cu (bias_add_f32) and bias_add.cu (bias_add_f16).
+
 #include <metal_stdlib>
 using namespace metal;
 
-// Bias addition: output[t, i] += bias[i]  for t in [0, seqLen), i in [0, dim)
-// In-place: output is read and written in the same buffer.
-// Mirrors the CUDA bias_add_f32 kernel.
-kernel void bias_add(
-    device float* output         [[ buffer(0) ]],
-    device const float* bias     [[ buffer(1) ]],
-    constant uint& dim           [[ buffer(2) ]],
-    constant uint& seq_len       [[ buffer(3) ]],
-    uint id                      [[ thread_position_in_grid ]])
+// ── bias_add_f32 ──────────────────────────────────────────────────────────────
+// output_f32[t, i] += float(bias_f16[i])  for t in [0, seq_len)
+// Port of bias_add_f32.cu::bias_add_f32
+// Note: bias is stored as FP16 (matches CUDA source).
+kernel void bias_add_f32(
+    device float*       output  [[buffer(0)]],
+    device const half*  bias    [[buffer(1)]],
+    constant uint&      dim     [[buffer(2)]],
+    constant uint&      seq_len [[buffer(3)]],
+    uint idx [[thread_position_in_grid]])
 {
-    if (id >= dim * seq_len) return;
-    output[id] += bias[id % dim];
+    if (idx < dim * seq_len)
+        output[idx] += float(bias[idx % dim]);
+}
+
+// ── bias_add_f16 ──────────────────────────────────────────────────────────────
+// output_f16[t, i] += bias_f16[i]  for t in [0, seq_len)
+// Vectorized: half2 packed operations process 2 elements per thread.
+// Port of bias_add.cu::bias_add_f16
+kernel void bias_add_f16(
+    device half*       output  [[buffer(0)]],
+    device const half* bias    [[buffer(1)]],
+    constant uint&     dim     [[buffer(2)]],
+    constant uint&     seq_len [[buffer(3)]],
+    uint idx [[thread_position_in_grid]])
+{
+    uint total  = dim * seq_len;
+    uint dim2   = dim / 2u;
+    uint total2 = total / 2u;
+
+    // dim is always even for transformer hidden sizes, so half2 is safe
+    if (idx < total2)
+    {
+        device       half2* out2  = (device half2*)output;
+        device const half2* bias2 = (device const half2*)bias;
+
+        // Map half2 index back to bias column pair
+        uint col2 = idx % dim2;
+        out2[idx] = out2[idx] + bias2[col2];
+    }
+
+    // Handle odd dim (shouldn't happen for transformers, but be safe)
+    if ((total & 1u) && idx == 0u)
+    {
+        uint last = total - 1u;
+        uint col  = last % dim;
+        output[last] = output[last] + bias[col];
+    }
 }

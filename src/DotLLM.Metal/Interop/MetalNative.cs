@@ -101,14 +101,23 @@ internal static partial class MetalNative
         float  theta,
         int    ropeType);
 
-    /// <summary>Bias addition (in-place): output[t, i] += bias[i]</summary>
+    /// <summary>Bias addition (in-place, FP32 output + FP16 bias): output[t, i] += float(bias[i])</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_bias_add_f32")]
     internal static unsafe partial int BiasAddF32(
         nint ctx,
-        float* output,
-        float* bias,
-        uint dim,
-        uint seqLen);
+        float*  output,
+        ushort* bias,       // FP16
+        uint    dim,
+        uint    seqLen);
+
+    /// <summary>Bias addition (in-place, FP16 output + FP16 bias): output[t, i] += bias[i]</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_bias_add_f16")]
+    internal static unsafe partial int BiasAddF16(
+        nint    ctx,
+        ushort* output,     // FP16, in-place
+        ushort* bias,       // FP16
+        uint    dim,
+        uint    seqLen);
 
     /// <summary>
     /// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i].
