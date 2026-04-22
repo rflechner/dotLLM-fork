@@ -281,13 +281,61 @@ extern "C" int dotllm_metal_multiply_f32(
     return run_binary_f32_kernel(ctx, "multiply.metal", "multiply_arrays", a, b, result, length);
 }
 
-extern "C" int dotllm_metal_softmax_f32(
+extern "C" int dotllm_metal_softmax_f16(
     dotllm_metal_context* ctx,
-    const float* input,
-    float* result,
-    uint32_t length)
+    const uint16_t* input,
+    uint16_t*       output,
+    int32_t         rows,
+    int32_t         cols)
 {
-    return run_unary_f32_kernel(ctx, "softmax.metal", "softmax", input, result, length);
+    @autoreleasepool {
+        if (!ctx || !input || !output) return -10;
+        if (rows <= 0 || cols <= 0)   return 0;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "softmax.metal", "softmax_f16");
+        if (!pipeline) return -3;
+
+        NSUInteger inputBytes  = (NSUInteger)(rows * cols) * sizeof(uint16_t);
+        NSUInteger outputBytes = inputBytes;
+
+        id<MTLBuffer> bufInput  = [ctx->device newBufferWithBytes:input
+                                                           length:inputBytes
+                                                          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOutput = [ctx->device newBufferWithLength:outputBytes
+                                                           options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufRows   = [ctx->device newBufferWithBytes:&rows
+                                                           length:sizeof(int32_t)
+                                                          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufCols   = [ctx->device newBufferWithBytes:&cols
+                                                           length:sizeof(int32_t)
+                                                          options:MTLResourceStorageModeShared];
+        if (!bufInput || !bufOutput || !bufRows || !bufCols) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufInput  offset:0 atIndex:0];
+        [enc setBuffer:bufOutput offset:0 atIndex:1];
+        [enc setBuffer:bufRows   offset:0 atIndex:2];
+        [enc setBuffer:bufCols   offset:0 atIndex:3];
+
+        // One threadgroup per row, 256 threads per threadgroup
+        [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOutput.contents, outputBytes);
+        return 0;
+    }
 }
 
 extern "C" int dotllm_metal_silu_f32(
