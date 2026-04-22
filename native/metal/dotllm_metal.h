@@ -50,11 +50,15 @@ int dotllm_metal_multiply_f32(
     float* result,
     uint32_t length);
 
-int dotllm_metal_softmax_f32(
+/// Numerically stable softmax, one threadgroup per row. FP16 I/O, FP32 accumulation.
+/// input/output layout: [rows, cols] — row-major.
+/// Port of softmax.cu::softmax_f16
+int dotllm_metal_softmax_f16(
     dotllm_metal_context* ctx,
-    const float* input,
-    float* result,
-    uint32_t length);
+    const uint16_t* input,
+    uint16_t*       output,
+    int32_t         rows,
+    int32_t         cols);
 
 /// SiLU activation: result[i] = input[i] * sigmoid(input[i])
 int dotllm_metal_silu_f32(
