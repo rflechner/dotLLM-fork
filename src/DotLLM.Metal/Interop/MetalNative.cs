@@ -76,13 +76,23 @@ internal static partial class MetalNative
         float* result,
         uint length);
 
+    /// <summary>SwiGLU (FP32): result[i] = SiLU(gate[i]) * up[i]</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_swiglu_f32")]
     internal static unsafe partial int SwigluF32(
         nint ctx,
         float* gate,
         float* up,
         float* result,
-        uint length);
+        uint   length);
+
+    /// <summary>SwiGLU (FP16): result[i] = SiLU(gate[i]) * up[i], vectorized half2</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_swiglu_f16")]
+    internal static unsafe partial int SwigluF16(
+        nint    ctx,
+        ushort* gate,
+        ushort* up,
+        ushort* result,
+        uint    length);
 
     /// <summary>
     /// Rotary Position Embedding (in-place). Direct translation of rope_f32.cu.

@@ -67,13 +67,24 @@ int dotllm_metal_silu_f32(
     float* result,
     uint32_t length);
 
-/// SwiGLU: result[i] = gate[i] * sigmoid(gate[i]) * up[i]
+/// SwiGLU (FP32): result[i] = SiLU(gate[i]) * up[i]
+/// Port of swiglu_f32.cu::swiglu_f32
 int dotllm_metal_swiglu_f32(
     dotllm_metal_context* ctx,
     const float* gate,
     const float* up,
-    float* result,
-    uint32_t length);
+    float*       result,
+    uint32_t     length);
+
+/// SwiGLU (FP16): result[i] = SiLU(gate[i]) * up[i]
+/// Vectorized: half2 loads/stores, FP32 computation for sigmoid precision.
+/// Port of swiglu.cu::swiglu_f16
+int dotllm_metal_swiglu_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* gate,
+    const uint16_t* up,
+    uint16_t*       result,
+    uint32_t        length);
 
 /// Rotary Position Embedding (in-place). Direct translation of rope_f32.cu.
 /// rope_type: 0 = norm/interleaved (Llama/Mistral), 1 = neox/split (Qwen/Phi).

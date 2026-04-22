@@ -354,7 +354,58 @@ extern "C" int dotllm_metal_swiglu_f32(
     float* result,
     uint32_t length)
 {
-    return run_binary_f32_kernel(ctx, "swiglu.metal", "swiglu", gate, up, result, length);
+    return run_binary_f32_kernel(ctx, "swiglu.metal", "swiglu_f32", gate, up, result, length);
+}
+
+extern "C" int dotllm_metal_swiglu_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* gate,
+    const uint16_t* up,
+    uint16_t*       result,
+    uint32_t        length)
+{
+    @autoreleasepool {
+        if (!ctx || !gate || !up || !result) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "swiglu.metal", "swiglu_f16");
+        if (!pipeline) return -3;
+
+        NSUInteger bytes = (NSUInteger)length * sizeof(uint16_t);
+        id<MTLBuffer> bufGate   = [ctx->device newBufferWithBytes:gate   length:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufUp     = [ctx->device newBufferWithBytes:up     length:bytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufResult = [ctx->device newBufferWithLength:bytes          options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufLen    = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
+        if (!bufGate || !bufUp || !bufResult || !bufLen) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufGate   offset:0 atIndex:0];
+        [enc setBuffer:bufUp     offset:0 atIndex:1];
+        [enc setBuffer:bufResult offset:0 atIndex:2];
+        [enc setBuffer:bufLen    offset:0 atIndex:3];
+
+        // Dispatch length/2 + 1 threads — vectorized half2 path + odd-tail guard
+        uint32_t dispatch = (length / 2u) + 1u;
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
+        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
+        if (tgw == 0) tgw = 1;
+
+        [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(result, bufResult.contents, bytes);
+        return 0;
+    }
 }
 
 extern "C" int dotllm_metal_bias_add_f32(
