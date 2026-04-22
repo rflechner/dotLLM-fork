@@ -24,13 +24,31 @@ internal static partial class MetalNative
 
     // ── Kernels ───────────────────────────────────────────────────────────
 
-    /// <summary>Element-wise addition: result[i] = a[i] + b[i]</summary>
+    /// <summary>Element-wise addition (FP32): result[i] = a[i] + b[i]</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_add_f32")]
     internal static unsafe partial int AddF32(
         nint ctx,
         float* a,
         float* b,
         float* result,
+        uint length);
+
+    /// <summary>Element-wise addition (FP16): result[i] = a[i] + b[i]</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_add_f16")]
+    internal static unsafe partial int AddF16(
+        nint ctx,
+        ushort* a,
+        ushort* b,
+        ushort* result,
+        uint length);
+
+    /// <summary>Mixed-precision addition: result_f32[i] = a_f32[i] + b_f16[i]</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_add_f32_f16")]
+    internal static unsafe partial int AddF32F16(
+        nint ctx,
+        float*  a,
+        ushort* b,
+        float*  result,
         uint length);
 
     /// <summary>Element-wise multiplication: result[i] = a[i] * b[i]</summary>

@@ -14,13 +14,33 @@ dotllm_metal_context* dotllm_metal_create_context(void);
 /// Destroys the context and releases all Metal resources.
 void dotllm_metal_destroy_context(dotllm_metal_context* ctx);
 
-/// Element-wise addition: result[i] = a[i] + b[i]
+/// Element-wise addition: result[i] = a[i] + b[i]  (all FP32)
+/// Port of add_f32.cu::add_f32
 int dotllm_metal_add_f32(
     dotllm_metal_context* ctx,
-    const float* a,
-    const float* b,
-    float* result,
-    uint32_t length);
+    const float*    a,
+    const float*    b,
+    float*          result,
+    uint32_t        length);
+
+/// Element-wise addition: result[i] = a[i] + b[i]  (all FP16, vectorized half2)
+/// Port of add.cu::add_f16
+int dotllm_metal_add_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* a,
+    const uint16_t* b,
+    uint16_t*       result,
+    uint32_t        length);
+
+/// Mixed-precision addition: result_f32[i] = a_f32[i] + b_f16[i]
+/// Used when adding an FP16 projection output into the FP32 residual stream.
+/// Port of add_f32.cu::add_f32_f16
+int dotllm_metal_add_f32_f16(
+    dotllm_metal_context* ctx,
+    const float*    a,
+    const uint16_t* b,
+    float*          result,
+    uint32_t        length);
 
 /// Element-wise multiplication: result[i] = a[i] * b[i]
 int dotllm_metal_multiply_f32(
