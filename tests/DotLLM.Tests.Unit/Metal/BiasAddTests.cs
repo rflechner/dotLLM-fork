@@ -1,20 +1,35 @@
 using DotLLM.Metal;
-using DotLLM.Models.Architectures;
 using Xunit;
 
 namespace DotLLM.Tests.Unit.Metal;
 
-public sealed class BiasAddTests
+// ── BiasAddF32 ────────────────────────────────────────────────────────────────
+// output_f32[t, i] += float(bias_f16[i])  — port of bias_add_f32.cu
+
+public sealed class BiasAddF32Tests
 {
+    // Build a Half[] from float values (exact for small integers / powers of 2)
+    private static Half[] H(params float[] values) =>
+        Array.ConvertAll(values, v => (Half)v);
+
+    /// <summary>Scalar CPU reference matching bias_add_f32.cu logic.</summary>
+    private static float[] CpuRef(float[] output, Half[] bias, int dim, int seqLen)
+    {
+        var result = (float[])output.Clone();
+        for (int t = 0; t < seqLen; t++)
+            for (int i = 0; i < dim; i++)
+                result[t * dim + i] += (float)bias[i];
+        return result;
+    }
+
     [Fact]
     public void SingleToken_BiasIsAdded()
     {
-        // seqLen=1, dim=4 — trivial case: output[0, i] += bias[i]
         float[] output = [1.0f, 2.0f, 3.0f, 4.0f];
-        float[] bias   = [10.0f, 20.0f, 30.0f, 40.0f];
+        Half[]  bias   = H(10.0f, 20.0f, 30.0f, 40.0f);
 
         using var ctx = new MetalContext();
-        BiasAdd.Execute(ctx, output, bias, dim: 4, seqLen: 1);
+        BiasAddF32.Execute(ctx, output, bias, dim: 4, seqLen: 1);
 
         Assert.Equal([11.0f, 22.0f, 33.0f, 44.0f], output);
     }
@@ -26,10 +41,10 @@ public sealed class BiasAddTests
         // token 0: [1, 2], token 1: [3, 4], token 2: [5, 6]
         // bias: [10, 20]
         float[] output = [1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f];
-        float[] bias   = [10.0f, 20.0f];
+        Half[]  bias   = H(10.0f, 20.0f);
 
         using var ctx = new MetalContext();
-        BiasAdd.Execute(ctx, output, bias, dim: 2, seqLen: 3);
+        BiasAddF32.Execute(ctx, output, bias, dim: 2, seqLen: 3);
 
         Assert.Equal([11.0f, 22.0f, 13.0f, 24.0f, 15.0f, 26.0f], output);
     }
@@ -38,11 +53,11 @@ public sealed class BiasAddTests
     public void ZeroBias_OutputUnchanged()
     {
         float[] output   = [1.0f, 2.0f, 3.0f, 4.0f];
-        float[] bias     = [0.0f, 0.0f, 0.0f, 0.0f];
+        Half[]  bias     = H(0.0f, 0.0f, 0.0f, 0.0f);
         float[] expected = [1.0f, 2.0f, 3.0f, 4.0f];
 
         using var ctx = new MetalContext();
-        BiasAdd.Execute(ctx, output, bias, dim: 4, seqLen: 1);
+        BiasAddF32.Execute(ctx, output, bias, dim: 4, seqLen: 1);
 
         Assert.Equal(expected, output);
     }
@@ -51,10 +66,10 @@ public sealed class BiasAddTests
     public void NegativeBias_SubtractsCorrectly()
     {
         float[] output = [5.0f, 5.0f, 5.0f];
-        float[] bias   = [-1.0f, -2.0f, -3.0f];
+        Half[]  bias   = H(-1.0f, -2.0f, -3.0f);
 
         using var ctx = new MetalContext();
-        BiasAdd.Execute(ctx, output, bias, dim: 3, seqLen: 1);
+        BiasAddF32.Execute(ctx, output, bias, dim: 3, seqLen: 1);
 
         Assert.Equal([4.0f, 3.0f, 2.0f], output);
     }
@@ -62,59 +77,161 @@ public sealed class BiasAddTests
     [Fact]
     public void ScalarReference_MatchesMetal()
     {
-        // Verifies Metal output matches a CPU scalar reference on random data.
         var rng = new Random(42);
-        const int dim = 512;
+        const int dim    = 512;
         const int seqLen = 8;
 
-        float[] output   = new float[dim * seqLen];
-        float[] bias     = new float[dim];
-        float[] expected = new float[dim * seqLen];
+        float[] output = new float[dim * seqLen];
+        Half[]  bias   = new Half[dim];
 
         for (int i = 0; i < output.Length; i++) output[i] = rng.NextSingle() * 10f - 5f;
-        for (int i = 0; i < bias.Length;   i++) bias[i]   = rng.NextSingle() * 2f  - 1f;
+        for (int i = 0; i < bias.Length;   i++) bias[i]   = (Half)(rng.NextSingle() * 2f - 1f);
 
-        // CPU scalar reference — set expected value from CPU backend
-        Array.Copy(output, expected, output.Length);
-        TransformerModel.AddBias(bias, expected, dim, seqLen);
+        float[] expected = CpuRef(output, bias, dim, seqLen);
 
         using var ctx = new MetalContext();
-        BiasAdd.Execute(ctx, output, bias, dim, seqLen);
+        BiasAddF32.Execute(ctx, output, bias, dim, seqLen);
 
-        // Verify Metal output matches CPU reference
         for (int i = 0; i < output.Length; i++)
-            Assert.Equal(expected[i], output[i], 1e-5f);
+            Assert.Equal(expected[i], output[i], 1e-2f); // FP16 bias → FP32 cast ~0.1% error
     }
 
     [Fact]
     public void BiasMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
-        float[] output = new float[8];
-        float[] bias   = new float[3];
-
-        Assert.Throws<ArgumentException>(() => BiasAdd.Execute(ctx, output, bias, dim: 4, seqLen: 2));
+        Assert.Throws<ArgumentException>(() =>
+            BiasAddF32.Execute(ctx, new float[8], H(0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
     [Fact]
     public void OutputSizeMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
-        float[] output = new float[7];
-        float[] bias   = new float[4];
-
-        Assert.Throws<ArgumentException>(() => BiasAdd.Execute(ctx, output, bias, dim: 4, seqLen: 2));
+        Assert.Throws<ArgumentException>(() =>
+            BiasAddF32.Execute(ctx, new float[7], H(0f, 0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
     [Fact]
     public void EmptyOutput_ReturnsSilently()
     {
         using var ctx = new MetalContext();
-        float[] output = [];
-        float[] bias   = [];
+        BiasAddF32.Execute(ctx, [], [], dim: 0, seqLen: 0);
+    }
+}
 
-        BiasAdd.Execute(ctx, output, bias, dim: 0, seqLen: 0);
+// ── BiasAddF16 ────────────────────────────────────────────────────────────────
+// output_f16[t, i] += bias_f16[i]  — port of bias_add.cu, vectorized half2
 
-        Assert.Empty(output);
+public sealed class BiasAddF16Tests
+{
+    private static Half[] H(params float[] values) =>
+        Array.ConvertAll(values, v => (Half)v);
+
+    /// <summary>Scalar CPU reference matching bias_add.cu logic.</summary>
+    private static Half[] CpuRef(Half[] output, Half[] bias, int dim, int seqLen)
+    {
+        var result = (Half[])output.Clone();
+        for (int t = 0; t < seqLen; t++)
+            for (int i = 0; i < dim; i++)
+                result[t * dim + i] = (Half)((float)result[t * dim + i] + (float)bias[i]);
+        return result;
+    }
+
+    [Fact]
+    public void SingleToken_BiasIsAdded()
+    {
+        Half[] output = H(1.0f, 2.0f, 3.0f, 4.0f);
+        Half[] bias   = H(10.0f, 20.0f, 30.0f, 40.0f);
+
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, output, bias, dim: 4, seqLen: 1);
+
+        Assert.Equal(H(11.0f, 22.0f, 33.0f, 44.0f), output);
+    }
+
+    [Fact]
+    public void MultipleTokens_SameBiasAppliedToEach()
+    {
+        // seqLen=3, dim=4 (even, exercises half2 path)
+        Half[] output = H(1f, 2f, 3f, 4f,   5f, 6f, 7f, 8f,   9f, 10f, 11f, 12f);
+        Half[] bias   = H(10f, 20f, 30f, 40f);
+
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, output, bias, dim: 4, seqLen: 3);
+
+        Half[] expected = H(11f, 22f, 33f, 44f,   15f, 26f, 37f, 48f,   19f, 30f, 41f, 52f);
+        Assert.Equal(expected, output);
+    }
+
+    [Fact]
+    public void ZeroBias_OutputUnchanged()
+    {
+        Half[] output   = H(1.0f, 2.0f, 3.0f, 4.0f);
+        Half[] bias     = H(0.0f, 0.0f, 0.0f, 0.0f);
+        Half[] expected = H(1.0f, 2.0f, 3.0f, 4.0f);
+
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, output, bias, dim: 4, seqLen: 1);
+
+        Assert.Equal(expected, output);
+    }
+
+    [Fact]
+    public void NegativeBias_SubtractsCorrectly()
+    {
+        Half[] output = H(5.0f, 5.0f, 5.0f, 5.0f);
+        Half[] bias   = H(-1.0f, -2.0f, -3.0f, -4.0f);
+
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, output, bias, dim: 4, seqLen: 1);
+
+        Assert.Equal(H(4.0f, 3.0f, 2.0f, 1.0f), output);
+    }
+
+    [Fact]
+    public void ScalarReference_MatchesMetal()
+    {
+        var rng = new Random(99);
+        const int dim    = 256; // even — exercises half2 path
+        const int seqLen = 4;
+
+        Half[] output = new Half[dim * seqLen];
+        Half[] bias   = new Half[dim];
+
+        for (int i = 0; i < output.Length; i++) output[i] = (Half)(rng.NextSingle() * 4f - 2f);
+        for (int i = 0; i < bias.Length;   i++) bias[i]   = (Half)(rng.NextSingle() * 2f - 1f);
+
+        Half[] expected = CpuRef(output, bias, dim, seqLen);
+
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, output, bias, dim, seqLen);
+
+        const float tol = 1e-2f;
+        for (int i = 0; i < output.Length; i++)
+            Assert.Equal((float)expected[i], (float)output[i], tol);
+    }
+
+    [Fact]
+    public void BiasMismatch_ThrowsArgumentException()
+    {
+        using var ctx = new MetalContext();
+        Assert.Throws<ArgumentException>(() =>
+            BiasAddF16.Execute(ctx, new Half[8], H(0f, 0f, 0f), dim: 4, seqLen: 2));
+    }
+
+    [Fact]
+    public void OutputSizeMismatch_ThrowsArgumentException()
+    {
+        using var ctx = new MetalContext();
+        Assert.Throws<ArgumentException>(() =>
+            BiasAddF16.Execute(ctx, new Half[7], H(0f, 0f, 0f, 0f), dim: 4, seqLen: 2));
+    }
+
+    [Fact]
+    public void EmptyOutput_ReturnsSilently()
+    {
+        using var ctx = new MetalContext();
+        BiasAddF16.Execute(ctx, [], [], dim: 0, seqLen: 0);
     }
 }

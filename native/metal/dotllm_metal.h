@@ -86,13 +86,24 @@ int dotllm_metal_rope_f32(
     float          theta,
     int32_t        rope_type);
 
-/// Bias addition (in-place): output[t, i] += bias[i]  for t in [0, seq_len), i in [0, dim)
+/// Bias addition (in-place, FP32 output + FP16 bias): output[t, i] += float(bias[i])
+/// Port of bias_add_f32.cu::bias_add_f32
 int dotllm_metal_bias_add_f32(
     dotllm_metal_context* ctx,
-    float* output,
-    const float* bias,
-    uint32_t dim,
-    uint32_t seq_len);
+    float*          output,
+    const uint16_t* bias,       // FP16
+    uint32_t        dim,
+    uint32_t        seq_len);
+
+/// Bias addition (in-place, FP16 output + FP16 bias): output[t, i] += bias[i]
+/// Vectorized: half2 packed operations process 2 elements per thread.
+/// Port of bias_add.cu::bias_add_f16
+int dotllm_metal_bias_add_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*       output,     // FP16, in-place
+    const uint16_t* bias,       // FP16
+    uint32_t        dim,
+    uint32_t        seq_len);
 
 /// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i]
 /// One threadgroup per token — reduction kernel, NOT element-wise.
