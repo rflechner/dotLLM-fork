@@ -277,6 +277,56 @@ internal static partial class MetalNative
         int    n,
         int    k);
 
+    /// <summary>Quantized GEMV Q8_0 (FP16 I/O). weight: n × (k/32) × 34 bytes. k multiple of 32.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q8_0")]
+    internal static unsafe partial int QuantizedGemvQ8_0(
+        nint    ctx,
+        byte*   weight,
+        ushort* x,
+        ushort* y,
+        int     n,
+        int     k);
+
+    /// <summary>Quantized GEMV Q5_0 (FP16 I/O). weight: n × (k/32) × 22 bytes. k multiple of 32.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q5_0")]
+    internal static unsafe partial int QuantizedGemvQ5_0(
+        nint    ctx,
+        byte*   weight,
+        ushort* x,
+        ushort* y,
+        int     n,
+        int     k);
+
+    /// <summary>Quantized GEMV Q4_K (FP16 I/O). weight: n × (k/256) × 144 bytes. k multiple of 256.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q4_k")]
+    internal static unsafe partial int QuantizedGemvQ4_K(
+        nint    ctx,
+        byte*   weight,
+        ushort* x,
+        ushort* y,
+        int     n,
+        int     k);
+
+    /// <summary>Quantized GEMV Q5_K (FP16 I/O). weight: n × (k/256) × 176 bytes. k multiple of 256.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q5_k")]
+    internal static unsafe partial int QuantizedGemvQ5_K(
+        nint    ctx,
+        byte*   weight,
+        ushort* x,
+        ushort* y,
+        int     n,
+        int     k);
+
+    /// <summary>Quantized GEMV Q6_K (FP16 I/O). weight: n × (k/256) × 210 bytes. k multiple of 256.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_quantized_gemv_q6_k")]
+    internal static unsafe partial int QuantizedGemvQ6_K(
+        nint    ctx,
+        byte*   weight,
+        ushort* x,
+        ushort* y,
+        int     n,
+        int     k);
+
     // ── Dequantization ────────────────────────────────────────────────────────────
 
     /// <summary>Dequantize Q8_0 → FP16. src: total_blocks × 34 bytes. dst: total_blocks × 32 halves (as ushort).</summary>

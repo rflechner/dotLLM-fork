@@ -262,6 +262,56 @@ int dotllm_metal_quantized_gemv_q8_0_f32in(
     int32_t        n,
     int32_t        k);
 
+/// Quantized GEMV (FP16 I/O): y[i] = dot(dequant(W_q8_0[i,:]), x)  for i in [0, n).
+/// weight: n × (k/32) blocks × 34 bytes. x/y: FP16 vectors. k must be a multiple of 32.
+int dotllm_metal_quantized_gemv_q8_0(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k);
+
+/// Quantized GEMV (FP16 I/O): y[i] = dot(dequant(W_q5_0[i,:]), x)  for i in [0, n).
+/// weight: n × (k/32) blocks × 22 bytes. x/y: FP16 vectors. k must be a multiple of 32.
+int dotllm_metal_quantized_gemv_q5_0(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k);
+
+/// Quantized GEMV (FP16 I/O): y[i] = dot(dequant(W_q4_k[i,:]), x)  for i in [0, n).
+/// weight: n × (k/256) superblocks × 144 bytes. x/y: FP16 vectors. k must be a multiple of 256.
+int dotllm_metal_quantized_gemv_q4_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k);
+
+/// Quantized GEMV (FP16 I/O): y[i] = dot(dequant(W_q5_k[i,:]), x)  for i in [0, n).
+/// weight: n × (k/256) superblocks × 176 bytes. x/y: FP16 vectors. k must be a multiple of 256.
+int dotllm_metal_quantized_gemv_q5_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k);
+
+/// Quantized GEMV (FP16 I/O): y[i] = dot(dequant(W_q6_k[i,:]), x)  for i in [0, n).
+/// weight: n × (k/256) superblocks × 210 bytes. x/y: FP16 vectors. k must be a multiple of 256.
+int dotllm_metal_quantized_gemv_q6_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k);
+
 // ── Dequantization ───────────────────────────────────────────────────────────
 
 /// Dequantize Q8_0 → FP16.
