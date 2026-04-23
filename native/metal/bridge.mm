@@ -1229,6 +1229,141 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
     }
 }
 
+// ── Quantized GEMV — FP16 I/O ────────────────────────────────────────────────
+//
+// Common dispatch helper for all 5 FP16-in/out GEMV kernels.
+// weight: raw quantized bytes; x/y: half vectors (uint16_t).
+// One threadgroup per output row, 256 threads per group.
+
+static int run_gemv_f16_kernel(
+    dotllm_metal_context* ctx,
+    const char*    functionName,
+    const uint8_t* weight,
+    NSUInteger     weightBytes,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    @autoreleasepool {
+        if (!ctx || !weight || !x || !y || n <= 0 || k <= 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "quantized_gemv.metal", functionName);
+        if (!pipeline) return -3;
+
+        NSUInteger xBytes = (NSUInteger)k * sizeof(uint16_t);
+        NSUInteger yBytes = (NSUInteger)n * sizeof(uint16_t);
+
+        id<MTLBuffer> bufW = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufX = [ctx->device newBufferWithBytes:x      length:xBytes      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufY = [ctx->device newBufferWithLength:yBytes                   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufK = [ctx->device newBufferWithBytes:&k length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        if (!bufW || !bufX || !bufY || !bufN || !bufK) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufW offset:0 atIndex:0];
+        [enc setBuffer:bufX offset:0 atIndex:1];
+        [enc setBuffer:bufY offset:0 atIndex:2];
+        [enc setBuffer:bufN offset:0 atIndex:3];
+        [enc setBuffer:bufK offset:0 atIndex:4];
+
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(y, bufY.contents, yBytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_quantized_gemv_q8_0(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    if (k % 32 != 0) return -10;
+    int32_t bpr = k / 32;
+    NSUInteger weightBytes = (NSUInteger)n * bpr * 34;
+    return run_gemv_f16_kernel(ctx, "quantized_gemv_q8_0",
+        weight, weightBytes, x, y, n, k);
+}
+
+extern "C" int dotllm_metal_quantized_gemv_q5_0(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    if (k % 32 != 0) return -10;
+    int32_t bpr = k / 32;
+    NSUInteger weightBytes = (NSUInteger)n * bpr * 22;
+    return run_gemv_f16_kernel(ctx, "quantized_gemv_q5_0",
+        weight, weightBytes, x, y, n, k);
+}
+
+extern "C" int dotllm_metal_quantized_gemv_q4_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    if (k % 256 != 0) return -10;
+    int32_t sbpr = k / 256;
+    NSUInteger weightBytes = (NSUInteger)n * sbpr * 144;
+    return run_gemv_f16_kernel(ctx, "quantized_gemv_q4_k",
+        weight, weightBytes, x, y, n, k);
+}
+
+extern "C" int dotllm_metal_quantized_gemv_q5_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    if (k % 256 != 0) return -10;
+    int32_t sbpr = k / 256;
+    NSUInteger weightBytes = (NSUInteger)n * sbpr * 176;
+    return run_gemv_f16_kernel(ctx, "quantized_gemv_q5_k",
+        weight, weightBytes, x, y, n, k);
+}
+
+extern "C" int dotllm_metal_quantized_gemv_q6_k(
+    dotllm_metal_context* ctx,
+    const uint8_t*  weight,
+    const uint16_t* x,
+    uint16_t*       y,
+    int32_t         n,
+    int32_t         k)
+{
+    if (k % 256 != 0) return -10;
+    int32_t sbpr = k / 256;
+    NSUInteger weightBytes = (NSUInteger)n * sbpr * 210;
+    return run_gemv_f16_kernel(ctx, "quantized_gemv_q6_k",
+        weight, weightBytes, x, y, n, k);
+}
+
 // ── Dequantization ───────────────────────────────────────────────────────────
 //
 // All dequant kernels share the same buffer layout:
