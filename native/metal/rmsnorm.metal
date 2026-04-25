@@ -98,3 +98,118 @@ kernel void rmsnorm_f32(
         y[i] = x[i] * scale * weight[i];
     }
 }
+
+
+// Port of rmsnorm_f16.cu — identical reduction structure to rmsnorm_f32,
+// FP16 I/O with FP32 accumulation throughout.
+kernel void rmsnorm_f16(
+    device const half*  input   [[ buffer(0) ]],   // x  : [seqLen, n]
+    device const half*  weight  [[ buffer(1) ]],   // w  : [n]  (RMSNorm scale)
+    device       half*  output  [[ buffer(2) ]],   // y  : [seqLen, n]
+    constant     int&   n       [[ buffer(3) ]],   // hidden dimension (e.g. 4096)
+    constant     float& eps     [[ buffer(4) ]],   // numerical stability epsilon (e.g. 1e-5)
+    uint row    [[ threadgroup_position_in_grid ]],
+    uint lid    [[ thread_position_in_threadgroup ]],
+    uint tgSize [[ threads_per_threadgroup ]])
+{
+    threadgroup float simd_sums[32];
+    threadgroup float ri = 0.0f;
+
+    const device half* x = input  + (size_t)row * n;
+    device       half* y = output + (size_t)row * n;
+
+    // Phase 1: partial sum of squares — FP32 accumulation (half → float on load)
+    float sum_sq = 0.0f;
+    for (uint i = lid; i < (uint)n; i += tgSize) {
+        float v = float(x[i]);
+        sum_sq += v * v;
+    }
+
+    // Phase 2: simd-group reduction
+    sum_sq = simd_sum(sum_sq);
+
+    // Phase 3: cross-simd reduction via threadgroup memory
+    uint simd_lane = lid % 32;
+    uint simd_id   = lid / 32;
+    if (simd_lane == 0) {
+        simd_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: first 32 threads reduce simd_sums[]
+    if (lid < 32) {
+        uint num_simds = (tgSize + 31) / 32;
+        sum_sq = (lid < num_simds) ? simd_sums[lid] : 0.0f;
+        sum_sq = simd_sum(sum_sq);
+    }
+
+    // Phase 5: thread 0 computes and broadcasts ri
+    if (lid == 0) {
+        ri = rsqrt(sum_sq / (float)n + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 6: normalize, scale, write back as half
+    float scale = ri;
+    for (uint i = lid; i < (uint)n; i += tgSize) {
+        y[i] = half(float(x[i]) * scale * float(weight[i]));
+    }
+}
+
+
+// RMS Normalization — FP32 residual input, FP32 weight, FP16 output.
+// Used when the residual stream is kept in FP32 but downstream GEMM needs FP16 input.
+// Port of rmsnorm_f32in.cu::rmsnorm_f32in_f16out.
+kernel void rmsnorm_f32in_f16out(
+    device const float* input   [[ buffer(0) ]],   // x  : [seqLen, n]  FP32
+    device const float* weight  [[ buffer(1) ]],   // w  : [n]          FP32
+    device       half*  output  [[ buffer(2) ]],   // y  : [seqLen, n]  FP16
+    constant     int&   n       [[ buffer(3) ]],
+    constant     float& eps     [[ buffer(4) ]],
+    uint row    [[ threadgroup_position_in_grid ]],
+    uint lid    [[ thread_position_in_threadgroup ]],
+    uint tgSize [[ threads_per_threadgroup ]])
+{
+    threadgroup float simd_sums[32];
+    threadgroup float ri = 0.0f;
+
+    const device float* x = input  + (size_t)row * n;
+    device       half*  y = output + (size_t)row * n;
+
+    // Phase 1: partial sum of squares (all FP32, no conversion needed)
+    float sum_sq = 0.0f;
+    for (uint i = lid; i < (uint)n; i += tgSize) {
+        float v = x[i];
+        sum_sq += v * v;
+    }
+
+    // Phase 2: simd-group reduction
+    sum_sq = simd_sum(sum_sq);
+
+    // Phase 3: cross-simd reduction via threadgroup memory
+    uint simd_lane = lid % 32;
+    uint simd_id   = lid / 32;
+    if (simd_lane == 0) {
+        simd_sums[simd_id] = sum_sq;
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 4: first 32 threads reduce simd_sums[]
+    if (lid < 32) {
+        uint num_simds = (tgSize + 31) / 32;
+        sum_sq = (lid < num_simds) ? simd_sums[lid] : 0.0f;
+        sum_sq = simd_sum(sum_sq);
+    }
+
+    // Phase 5: thread 0 computes and broadcasts ri
+    if (lid == 0) {
+        ri = rsqrt(sum_sq / (float)n + eps);
+    }
+    threadgroup_barrier(mem_flags::mem_threadgroup);
+
+    // Phase 6: normalize, scale, truncate to FP16 on write
+    float scale = ri;
+    for (uint i = lid; i < (uint)n; i += tgSize) {
+        y[i] = half(x[i] * scale * weight[i]);
+    }
+}

@@ -149,7 +149,7 @@ internal static partial class MetalNative
         uint    seqLen);
 
     /// <summary>
-    /// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i].
+    /// RMS Normalization (FP32): output[t, i] = input[t, i] / rms(input[t]) * weight[i].
     /// Reduction kernel — one threadgroup per token, NOT element-wise.
     /// </summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_rmsnorm_f32")]
@@ -161,6 +161,19 @@ internal static partial class MetalNative
         int    n,
         int    seqLen,
         float  eps);
+
+    /// <summary>
+    /// RMS Normalization (FP16): same formula as F32, FP16 I/O with FP32 accumulation.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_rmsnorm_f16")]
+    internal static unsafe partial int RmsNormF16(
+        nint    ctx,
+        ushort* input,
+        ushort* weight,
+        ushort* output,
+        int     n,
+        int     seqLen,
+        float   eps);
 
     /// <summary>
     /// Per-head RMS Normalization (in-place).
@@ -176,6 +189,35 @@ internal static partial class MetalNative
         int    headDim,
         int    seqLen,
         float  eps);
+
+    /// <summary>
+    /// Per-head RMS Normalization (FP16, in-place). FP16 I/O with FP32 accumulation.
+    /// For each (token, head), normalizes head_dim elements in-place.
+    /// One threadgroup per (token × head).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_per_head_rmsnorm_f16")]
+    internal static unsafe partial int PerHeadRmsNormF16(
+        nint    ctx,
+        ushort* qk,
+        ushort* weight,
+        int     numHeads,
+        int     headDim,
+        int     seqLen,
+        float   eps);
+
+    /// <summary>
+    /// RMS Normalization — FP32 residual input, FP32 weight, FP16 output.
+    /// Port of rmsnorm_f32in.cu::rmsnorm_f32in_f16out.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_rmsnorm_f32in_f16out")]
+    internal static unsafe partial int RmsNormF32InF16Out(
+        nint    ctx,
+        float*  input,
+        float*  weight,
+        ushort* output,
+        int     n,
+        int     seqLen,
+        float   eps);
 
     /// <summary>
     /// Fused residual-add + RMS normalization (FP16 I/O).

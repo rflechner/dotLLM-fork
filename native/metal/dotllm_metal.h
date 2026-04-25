@@ -136,7 +136,7 @@ int dotllm_metal_bias_add_f16(
     uint32_t        dim,
     uint32_t        seq_len);
 
-/// RMS Normalization: output[t, i] = input[t, i] / rms(input[t]) * weight[i]
+/// RMS Normalization (FP32): output[t, i] = input[t, i] / rms(input[t]) * weight[i]
 /// One threadgroup per token — reduction kernel, NOT element-wise.
 int dotllm_metal_rmsnorm_f32(
     dotllm_metal_context* ctx,
@@ -146,6 +146,17 @@ int dotllm_metal_rmsnorm_f32(
     int32_t      n,
     int32_t      seq_len,
     float        eps);
+
+/// RMS Normalization (FP16): same formula, FP16 I/O with FP32 accumulation.
+/// Port of rmsnorm_f16.cu. One threadgroup per token.
+int dotllm_metal_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* input,
+    const uint16_t* weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps);
 
 /// Fused residual-add + RMS normalization (FP16).
 /// Pass 1: sum = FP32(residual[i]) + FP32(x[i]); residual[i] = FP16(sum); accumulate sum².
@@ -171,6 +182,29 @@ int dotllm_metal_per_head_rmsnorm_f32(
     int32_t      head_dim,
     int32_t      seq_len,
     float        eps);
+
+/// Per-head RMS Normalization (FP16, in-place). Port of per_head_rmsnorm_f16.cu.
+/// FP16 I/O with FP32 accumulation. One threadgroup per (token × head).
+int dotllm_metal_per_head_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*       qk,
+    const uint16_t* weight,
+    int32_t         num_heads,
+    int32_t         head_dim,
+    int32_t         seq_len,
+    float           eps);
+
+/// RMS Normalization — FP32 residual input, FP32 weight, FP16 output.
+/// Used when the residual stream is FP32 but downstream GEMM needs FP16 input.
+/// Port of rmsnorm_f32in.cu::rmsnorm_f32in_f16out.
+int dotllm_metal_rmsnorm_f32in_f16out(
+    dotllm_metal_context* ctx,
+    const float*    input,
+    const float*    weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps);
 
 /// Embedding lookup — FP32 table → FP32 output.
 /// output[t] = embed_table[token_ids[t]]  (hidden_size floats copied per token).
