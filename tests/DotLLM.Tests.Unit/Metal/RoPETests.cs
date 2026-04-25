@@ -2,6 +2,8 @@ using DotLLM.Core.Configuration;
 using DotLLM.Metal;
 using Xunit;
 
+// Shared tolerance for FP16 RoPE: one rotation with FP16 I/O → ~0.2 % relative error.
+
 namespace DotLLM.Tests.Unit.Metal;
 
 public sealed class RoPETests
@@ -185,5 +187,157 @@ public sealed class RoPETests
 
         for (int i = 0; i < q.Length; i++) Assert.Equal(qExpected[i], q[i], 1e-4f);
         for (int i = 0; i < k.Length; i++) Assert.Equal(kExpected[i], k[i], 1e-4f);
+    }
+}
+
+// ── RoPE FP16 ─────────────────────────────────────────────────────────────────
+
+public sealed class RoPEF16Tests
+{
+    // FP16 I/O, FP32 computation: one rotation per element pair → ~0.2 % relative error.
+    private const float Tol = 1e-2f;
+
+    /// <summary>
+    /// CPU reference: Half→float, run CPU RoPE, compare float vs (float)gpu_half.
+    /// </summary>
+    private static (float[] qRef, float[] kRef) CpuRef(
+        Half[] q, Half[] k, int[] positions,
+        int numHeads, int numKvHeads, int headDim,
+        int ropeDim, float theta, RoPEType ropeType)
+    {
+        float[] cosTable = new float[positions.Length * (ropeDim / 2)];
+        float[] sinTable = new float[positions.Length * (ropeDim / 2)];
+        DotLLM.Cpu.Kernels.RoPE.PrecomputeFrequencyTable(
+            positions.Length, ropeDim, theta, cosTable, sinTable);
+
+        float[] qF = Array.ConvertAll(q, h => (float)h);
+        float[] kF = Array.ConvertAll(k, h => (float)h);
+        DotLLM.Cpu.Kernels.RoPE.Execute(
+            qF, kF, positions, numHeads, numKvHeads, headDim, ropeDim, cosTable, sinTable, ropeType);
+        return (qF, kF);
+    }
+
+    private static void AssertClose(float[] expected, Half[] actual)
+    {
+        Assert.Equal(expected.Length, actual.Length);
+        for (int i = 0; i < expected.Length; i++)
+            Assert.Equal(expected[i], (float)actual[i], Tol);
+    }
+
+    // ── Norm variant (Llama/Mistral) ─────────────────────────────────────────
+
+    [Fact]
+    public void NormVariant_MatchesCpu()
+    {
+        const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
+        const float theta = 10000f;
+        var rng = new Random(42);
+
+        Half[] q = new Half[seqLen * numHeads    * headDim];
+        Half[] k = new Half[seqLen * numKvHeads  * headDim];
+        for (int i = 0; i < q.Length; i++) q[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k.Length; i++) k[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        int[] positions = [0, 1, 2, 3];
+
+        var (qRef, kRef) = CpuRef(q, k, positions, numHeads, numKvHeads, headDim, headDim, theta, RoPEType.Norm);
+
+        using var ctx = new MetalContext();
+        RoPEF16.Execute(ctx, q, k, positions, numHeads, numKvHeads, headDim, theta);
+
+        AssertClose(qRef, q);
+        AssertClose(kRef, k);
+    }
+
+    // ── NeoX variant (Qwen/Phi) ──────────────────────────────────────────────
+
+    [Fact]
+    public void NeoXVariant_MatchesCpu()
+    {
+        const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
+        const float theta = 10000f;
+        var rng = new Random(99);
+
+        Half[] q = new Half[seqLen * numHeads    * headDim];
+        Half[] k = new Half[seqLen * numKvHeads  * headDim];
+        for (int i = 0; i < q.Length; i++) q[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k.Length; i++) k[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        int[] positions = [0, 1, 2, 3];
+
+        var (qRef, kRef) = CpuRef(q, k, positions, numHeads, numKvHeads, headDim, headDim, theta, RoPEType.NeoX);
+
+        using var ctx = new MetalContext();
+        RoPEF16.Execute(ctx, q, k, positions, numHeads, numKvHeads, headDim, theta, RoPEType.NeoX);
+
+        AssertClose(qRef, q);
+        AssertClose(kRef, k);
+    }
+
+    // ── Position 0 = identité ────────────────────────────────────────────────
+
+    [Fact]
+    public void PositionZero_VecUnchanged()
+    {
+        // cos(0) = 1, sin(0) = 0 → rotation = identité
+        const int seqLen = 1, numHeads = 1, numKvHeads = 1, headDim = 4;
+
+        Half[] q = [(Half)1f, (Half)2f, (Half)3f, (Half)4f];
+        Half[] k = [(Half)5f, (Half)6f, (Half)7f, (Half)8f];
+        Half[] qOrig = (Half[])q.Clone();
+        Half[] kOrig = (Half[])k.Clone();
+        int[] positions = [0];
+
+        using var ctx = new MetalContext();
+        RoPEF16.Execute(ctx, q, k, positions, numHeads, numKvHeads, headDim, 10000f);
+
+        for (int i = 0; i < q.Length; i++) Assert.Equal((float)qOrig[i], (float)q[i], 1e-3f);
+        for (int i = 0; i < k.Length; i++) Assert.Equal((float)kOrig[i], (float)k[i], 1e-3f);
+    }
+
+    // ── GQA : numKvHeads < numHeads ──────────────────────────────────────────
+
+    [Fact]
+    public void GQA_KvHeadsRotatedCorrectly()
+    {
+        const int seqLen = 2, numHeads = 4, numKvHeads = 1, headDim = 8;
+        const float theta = 10000f;
+        var rng = new Random(7);
+
+        Half[] q = new Half[seqLen * numHeads    * headDim];
+        Half[] k = new Half[seqLen * numKvHeads  * headDim];
+        for (int i = 0; i < q.Length; i++) q[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k.Length; i++) k[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        int[] positions = [0, 1];
+
+        var (qRef, kRef) = CpuRef(q, k, positions, numHeads, numKvHeads, headDim, headDim, theta, RoPEType.Norm);
+
+        using var ctx = new MetalContext();
+        RoPEF16.Execute(ctx, q, k, positions, numHeads, numKvHeads, headDim, theta);
+
+        AssertClose(qRef, q);
+        AssertClose(kRef, k);
+    }
+
+    // ── ropeDim partiel ──────────────────────────────────────────────────────
+
+    [Fact]
+    public void PartialRopeDim_MatchesCpu()
+    {
+        const int seqLen = 2, numHeads = 2, numKvHeads = 1, headDim = 8, ropeDim = 4;
+        const float theta = 10000f;
+        var rng = new Random(13);
+
+        Half[] q = new Half[seqLen * numHeads    * headDim];
+        Half[] k = new Half[seqLen * numKvHeads  * headDim];
+        for (int i = 0; i < q.Length; i++) q[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        for (int i = 0; i < k.Length; i++) k[i] = (Half)(rng.NextSingle() * 2f - 1f);
+        int[] positions = [0, 1];
+
+        var (qRef, kRef) = CpuRef(q, k, positions, numHeads, numKvHeads, headDim, ropeDim, theta, RoPEType.Norm);
+
+        using var ctx = new MetalContext();
+        RoPEF16.Execute(ctx, q, k, positions, numHeads, numKvHeads, headDim, ropeDim, theta);
+
+        AssertClose(qRef, q);
+        AssertClose(kRef, k);
     }
 }
