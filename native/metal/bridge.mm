@@ -750,6 +750,61 @@ extern "C" int dotllm_metal_rmsnorm_f32(
     }
 }
 
+extern "C" int dotllm_metal_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* input,
+    const uint16_t* weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps)
+{
+    @autoreleasepool {
+        if (!ctx || !input || !weight || !output) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f16");
+        if (!pipeline) return -3;
+
+        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+
+        NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
+        NSUInteger weightBytes = (NSUInteger)n * sizeof(uint16_t);
+
+        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:inputBytes               options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
+
+        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufIn  offset:0 atIndex:0];
+        [enc setBuffer:bufW   offset:0 atIndex:1];
+        [enc setBuffer:bufOut offset:0 atIndex:2];
+        [enc setBuffer:bufN   offset:0 atIndex:3];
+        [enc setBuffer:bufEps offset:0 atIndex:4];
+
+        [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOut.contents, inputBytes);
+        return 0;
+    }
+}
+
 // Helper shared by both convert kernels.
 // srcElemSize / dstElemSize: sizeof(half)=2, sizeof(float)=4.
 static int run_convert_kernel(
@@ -859,6 +914,122 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
 
         if (cmd.error != nil) return -11;
         // bufQK wraps host memory directly — no memcpy needed.
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_per_head_rmsnorm_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*       qk,
+    const uint16_t* weight,
+    int32_t         num_heads,
+    int32_t         head_dim,
+    int32_t         seq_len,
+    float           eps)
+{
+    @autoreleasepool {
+        if (!ctx || !qk || !weight) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f16");
+        if (!pipeline) return -3;
+
+        uint32_t tgSize  = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        uint32_t nGroups = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
+
+        NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(uint16_t);
+        NSUInteger weightBytes = (NSUInteger)head_dim * sizeof(uint16_t);
+
+        // qk is in-place: wrap host memory directly on Apple Silicon unified memory.
+        id<MTLBuffer> bufQK     = [ctx->device newBufferWithBytesNoCopy:qk length:qkBytes
+                                      options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> bufWeight = [ctx->device newBufferWithBytes:weight length:weightBytes
+                                      options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps       length:sizeof(float)   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNH     = [ctx->device newBufferWithBytes:&num_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufHD     = [ctx->device newBufferWithBytes:&head_dim  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSL     = [ctx->device newBufferWithBytes:&seq_len   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+
+        if (!bufQK || !bufWeight || !bufEps || !bufNH || !bufHD || !bufSL) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufQK     offset:0 atIndex:0];
+        [enc setBuffer:bufWeight offset:0 atIndex:1];
+        [enc setBuffer:bufEps    offset:0 atIndex:2];
+        [enc setBuffer:bufNH     offset:0 atIndex:3];
+        [enc setBuffer:bufHD     offset:0 atIndex:4];
+        [enc setBuffer:bufSL     offset:0 atIndex:5];
+
+        [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+        // bufQK wraps host memory directly — no memcpy needed.
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
+    dotllm_metal_context* ctx,
+    const float*    input,
+    const float*    weight,
+    uint16_t*       output,
+    int32_t         n,
+    int32_t         seq_len,
+    float           eps)
+{
+    @autoreleasepool {
+        if (!ctx || !input || !weight || !output) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32in_f16out");
+        if (!pipeline) return -3;
+
+        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+
+        NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
+        NSUInteger outputBytes = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
+        NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
+
+        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outputBytes              options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
+
+        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufIn  offset:0 atIndex:0];
+        [enc setBuffer:bufW   offset:0 atIndex:1];
+        [enc setBuffer:bufOut offset:0 atIndex:2];
+        [enc setBuffer:bufN   offset:0 atIndex:3];
+        [enc setBuffer:bufEps offset:0 atIndex:4];
+
+        [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOut.contents, outputBytes);
         return 0;
     }
 }
