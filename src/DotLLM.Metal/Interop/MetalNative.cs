@@ -112,6 +112,24 @@ internal static partial class MetalNative
         float  theta,
         int    ropeType);
 
+    /// <summary>
+    /// Rotary Position Embedding (in-place, FP16). FP32 accumulation internally.
+    /// ropeType: 0 = norm/interleaved (Llama/Mistral), 1 = neox/split (Qwen/Phi).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_rope_f16")]
+    internal static unsafe partial int RoPEF16(
+        nint    ctx,
+        ushort* q,
+        ushort* k,
+        int*    positions,
+        int     seqLen,
+        int     numHeads,
+        int     numKvHeads,
+        int     headDim,
+        int     ropeDim,
+        float   theta,
+        int     ropeType);
+
     /// <summary>Bias addition (in-place, FP32 output + FP16 bias): output[t, i] += float(bias[i])</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_bias_add_f32")]
     internal static unsafe partial int BiasAddF32(

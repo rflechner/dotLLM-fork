@@ -101,6 +101,22 @@ int dotllm_metal_rope_f32(
     float          theta,
     int32_t        rope_type);
 
+/// Rotary Position Embedding (in-place, FP16). FP32 accumulation internally.
+/// Direct translation of rope_f16.cu. Same parameters as dotllm_metal_rope_f32.
+/// rope_type: 0 = norm/interleaved (Llama/Mistral), 1 = neox/split (Qwen/Phi).
+int dotllm_metal_rope_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*      q,
+    uint16_t*      k,
+    const int32_t* positions,
+    int32_t        seq_len,
+    int32_t        num_heads,
+    int32_t        num_kv_heads,
+    int32_t        head_dim,
+    int32_t        rope_dim,
+    float          theta,
+    int32_t        rope_type);
+
 /// Bias addition (in-place, FP32 output + FP16 bias): output[t, i] += float(bias[i])
 /// Port of bias_add_f32.cu::bias_add_f32
 int dotllm_metal_bias_add_f32(

@@ -610,6 +610,85 @@ extern "C" int dotllm_metal_rope_f32(
     }
 }
 
+extern "C" int dotllm_metal_rope_f16(
+    dotllm_metal_context* ctx,
+    uint16_t*      q,
+    uint16_t*      k,
+    const int32_t* positions,
+    int32_t        seq_len,
+    int32_t        num_heads,
+    int32_t        num_kv_heads,
+    int32_t        head_dim,
+    int32_t        rope_dim,
+    float          theta,
+    int32_t        rope_type)
+{
+    @autoreleasepool {
+        if (!ctx || !q || !k || !positions) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "RoPE.metal", "rope_f16");
+        if (!pipeline) return -3;
+
+        int32_t half_rope     = rope_dim / 2;
+        uint32_t total_q      = (uint32_t)(seq_len * num_heads    * half_rope);
+        uint32_t total_k      = (uint32_t)(seq_len * num_kv_heads * half_rope);
+        uint32_t dispatch_len = total_q > total_k ? total_q : total_k;
+
+        NSUInteger qBytes   = (NSUInteger)(seq_len * num_heads    * head_dim) * sizeof(uint16_t);
+        NSUInteger kBytes   = (NSUInteger)(seq_len * num_kv_heads * head_dim) * sizeof(uint16_t);
+        NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
+
+        id<MTLBuffer> bufQ    = [ctx->device newBufferWithBytesNoCopy:q length:qBytes
+                                    options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> bufK    = [ctx->device newBufferWithBytesNoCopy:k length:kBytes
+                                    options:MTLResourceStorageModeShared deallocator:nil];
+        id<MTLBuffer> bufPos  = [ctx->device newBufferWithBytes:positions length:posBytes
+                                    options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSL   = [ctx->device newBufferWithBytes:&seq_len      length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNH   = [ctx->device newBufferWithBytes:&num_heads    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNKV  = [ctx->device newBufferWithBytes:&num_kv_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufHD   = [ctx->device newBufferWithBytes:&head_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufRD   = [ctx->device newBufferWithBytes:&rope_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufTh   = [ctx->device newBufferWithBytes:&theta        length:sizeof(float)   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufRT   = [ctx->device newBufferWithBytes:&rope_type    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+
+        if (!bufQ || !bufK || !bufPos || !bufSL || !bufNH ||
+            !bufNKV || !bufHD || !bufRD || !bufTh || !bufRT) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufQ   offset:0 atIndex:0];
+        [enc setBuffer:bufK   offset:0 atIndex:1];
+        [enc setBuffer:bufPos offset:0 atIndex:2];
+        [enc setBuffer:bufSL  offset:0 atIndex:3];
+        [enc setBuffer:bufNH  offset:0 atIndex:4];
+        [enc setBuffer:bufNKV offset:0 atIndex:5];
+        [enc setBuffer:bufHD  offset:0 atIndex:6];
+        [enc setBuffer:bufRD  offset:0 atIndex:7];
+        [enc setBuffer:bufTh  offset:0 atIndex:8];
+        [enc setBuffer:bufRT  offset:0 atIndex:9];
+
+        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
+        if (tgw == 0) tgw = 1;
+
+        [enc dispatchThreads:MTLSizeMake(dispatch_len, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+        return 0;
+    }
+}
+
 extern "C" int dotllm_metal_rmsnorm_f32(
     dotllm_metal_context* ctx,
     const float* input,
