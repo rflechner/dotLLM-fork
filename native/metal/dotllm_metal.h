@@ -434,6 +434,48 @@ int dotllm_metal_convert_f32_to_f16(
     uint16_t*    dst,
     int32_t      n);
 
+// ── GEMM (Metal Performance Shaders) ─────────────────────────────────────────
+//
+// C[m, n] = alpha * op(A) * op(B) + beta * C
+//   op(X) = X^T if transpose_x != 0, else X.
+//
+// Storage layouts (row-major, no transpose):
+//   A : [m, k] (or [k, m] if transpose_a)
+//   B : [k, n] (or [n, k] if transpose_b)
+//   C : [m, n]
+//
+// Standard LLM projection Y = X · W^T with W stored as [N, K]:
+//   m = seqLen, n = outputDim, k = inputDim
+//   transpose_a = 0, transpose_b = 1, alpha = 1, beta = 0.
+
+/// FP16 GEMM via MPSMatrixMultiplication. Buffers passed as uint16_t* (half bit layout).
+int dotllm_metal_gemm_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* a,
+    const uint16_t* b,
+    uint16_t*       c,
+    int32_t         m,
+    int32_t         n,
+    int32_t         k,
+    int32_t         transpose_a,
+    int32_t         transpose_b,
+    float           alpha,
+    float           beta);
+
+/// FP32 GEMM via MPSMatrixMultiplication.
+int dotllm_metal_gemm_f32(
+    dotllm_metal_context* ctx,
+    const float*    a,
+    const float*    b,
+    float*          c,
+    int32_t         m,
+    int32_t         n,
+    int32_t         k,
+    int32_t         transpose_a,
+    int32_t         transpose_b,
+    float           alpha,
+    float           beta);
+
 #ifdef __cplusplus
 }
 #endif
