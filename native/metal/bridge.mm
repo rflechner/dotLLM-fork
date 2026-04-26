@@ -1,15 +1,37 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
 #import <MetalPerformanceShaders/MetalPerformanceShaders.h>
+#include <dlfcn.h>
 #include <stdint.h>
 #include <string.h>
 #include "dotllm_metal.h"
 
+// Name of the pre-compiled archive produced by build.sh. Must sit next to
+// libdotllmmetal.dylib in the deployment layout. Defined in one place so
+// build.sh, the .csproj copy rules and the runtime loader stay in sync.
+static NSString* const kKernelLibraryFileName = @"dotllm_kernels.metallib";
+
 struct dotllm_metal_context {
     id<MTLDevice>       device;
     id<MTLCommandQueue> queue;
+    id<MTLLibrary>      library;       // pre-compiled dotllm_kernels.metallib, loaded once
     NSMutableDictionary<NSString*, id<MTLComputePipelineState>>* pipelines;
 };
+
+// Locate `dotllm_kernels.metallib` next to this dylib using dladdr().
+// dl_info.dli_fname is the absolute path to the loaded image that contains
+// the function whose address we hand in — i.e. ourselves. This is robust
+// to whatever cwd the host process runs in.
+static NSString* find_kernel_library(void)
+{
+    Dl_info info;
+    if (dladdr((const void*)&find_kernel_library, &info) == 0 || !info.dli_fname) {
+        return nil;
+    }
+    NSString* dylibPath = @(info.dli_fname);
+    NSString* dir       = [dylibPath stringByDeletingLastPathComponent];
+    return [dir stringByAppendingPathComponent:kKernelLibraryFileName];
+}
 
 dotllm_metal_context* dotllm_metal_create_context(void)
 {
@@ -19,9 +41,22 @@ dotllm_metal_context* dotllm_metal_create_context(void)
     id<MTLCommandQueue> queue = [device newCommandQueue];
     if (!queue) return nullptr;
 
+    // Load the pre-compiled archive once. No runtime MSL→AIR compilation.
+    NSString* libPath = find_kernel_library();
+    if (!libPath) return nullptr;
+
+    NSError*      error  = nil;
+    NSURL*        libURL = [NSURL fileURLWithPath:libPath];
+    id<MTLLibrary> library = [device newLibraryWithURL:libURL error:&error];
+    if (!library) {
+        NSLog(@"dotllm_metal: failed to load %@: %@", libPath, error);
+        return nullptr;
+    }
+
     dotllm_metal_context* ctx = new dotllm_metal_context();
     ctx->device    = device;
     ctx->queue     = queue;
+    ctx->library   = library;
     ctx->pipelines = [NSMutableDictionary new];
     return ctx;
 }
@@ -33,30 +68,32 @@ void dotllm_metal_destroy_context(dotllm_metal_context* ctx)
     delete ctx;
 }
 
+// `shaderPath` is kept in the signature for backward source compatibility
+// with the call sites, but is ignored — all functions now live in the
+// pre-loaded dotllm_kernels.metallib. The cache key is just the function name.
 static id<MTLComputePipelineState> get_or_create_pipeline(
     dotllm_metal_context* ctx,
-    const char* shaderPath,
+    const char* shaderPath,         // unused; retained for call-site compatibility
     const char* functionName)
 {
-    NSString* key = [NSString stringWithFormat:@"%s|%s", shaderPath, functionName];
+    (void)shaderPath;
+    NSString* key = @(functionName);
 
     id<MTLComputePipelineState> pipeline = ctx->pipelines[key];
     if (pipeline) return pipeline;
 
+    id<MTLFunction> function = [ctx->library newFunctionWithName:key];
+    if (!function) {
+        NSLog(@"dotllm_metal: function '%s' not found in %@", functionName, kKernelLibraryFileName);
+        return nil;
+    }
+
     NSError* error = nil;
-    NSString* source = [NSString stringWithContentsOfFile:@(shaderPath)
-                                                 encoding:NSUTF8StringEncoding
-                                                    error:&error];
-    if (!source) return nil;
-
-    id<MTLLibrary> library = [ctx->device newLibraryWithSource:source options:nil error:&error];
-    if (!library) return nil;
-
-    id<MTLFunction> function = [library newFunctionWithName:@(functionName)];
-    if (!function) return nil;
-
     pipeline = [ctx->device newComputePipelineStateWithFunction:function error:&error];
-    if (!pipeline) return nil;
+    if (!pipeline) {
+        NSLog(@"dotllm_metal: failed to create pipeline for '%s': %@", functionName, error);
+        return nil;
+    }
 
     ctx->pipelines[key] = pipeline;
     return pipeline;

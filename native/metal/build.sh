@@ -17,11 +17,18 @@ clang++ \
   -framework MetalPerformanceShaders \
   -o "$DYLIB"
 
+# Compile each .metal → .air, then link them all into a single dotllm_kernels.metallib.
+# This single archive is loaded once at context creation; no runtime MSL→AIR
+# compilation, no .metal source files needed at runtime.
 for metal_file in *.metal; do
     name="${metal_file%.metal}"
     xcrun -sdk macosx metal -c "$metal_file" -o "bin/${name}.air"
-    xcrun -sdk macosx metallib "bin/${name}.air" -o "bin/${name}.metallib"
 done
+
+xcrun -sdk macosx metallib bin/*.air -o bin/dotllm_kernels.metallib
+
+# Per-shader .air intermediates are no longer needed once the archive is built.
+rm -f bin/*.air
 
 # ── Build summary ────────────────────────────────────────────────────────────
 echo
@@ -46,13 +53,13 @@ otool -L "$DYLIB" \
 exports=$(nm -gU "$DYLIB" 2>/dev/null | grep -c "_dotllm_metal_" || true)
 echo "exported symbols   : $exports dotllm_metal_* entry points"
 
-# 5) Metal libraries — one .metallib per .metal source.
-metallib_count=$(ls bin/*.metallib 2>/dev/null | wc -l | tr -d ' ')
+# 5) Combined Metal library — single archive loaded once at runtime.
 metal_count=$(ls *.metal 2>/dev/null | wc -l | tr -d ' ')
-echo "metal libraries    : $metallib_count / $metal_count compiled"
-
-if [ "$metallib_count" -ne "$metal_count" ]; then
-    echo "  WARNING: mismatch between .metal sources and compiled .metallib files"
+if [ -f bin/dotllm_kernels.metallib ]; then
+    metallib_kb=$(($(stat -f%z bin/dotllm_kernels.metallib) / 1024))
+    echo "metallib           : bin/dotllm_kernels.metallib (${metallib_kb} KB, $metal_count shaders linked)"
+else
+    echo "metallib           : MISSING — runtime will fail to load"
 fi
 
 echo "─────────────────────────────────────────────────────────────"

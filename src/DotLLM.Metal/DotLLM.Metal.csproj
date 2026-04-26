@@ -18,19 +18,21 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Include="../../Native/metal/*.metal" Link="kernels/*.metal">
+    <!--
+      Two files ship next to the managed assembly:
+        libdotllmmetal.dylib       — native bridge (P/Invoke target)
+        dotllm_kernels.metallib    — pre-compiled archive of all GPU shaders
+      The dylib uses dladdr() at runtime to locate dotllm_kernels.metallib
+      next to itself, so they MUST live in the same output directory.
+    -->
+    <None Include="../../Native/metal/bin/libdotllmmetal.dylib" Link="libdotllmmetal.dylib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>%(Filename)%(Extension)</TargetPath>
+      <TargetPath>libdotllmmetal.dylib</TargetPath>
     </None>
 
-    <None Include="../../Native/metal/bin/*.metallib" Link="kernels/*.metallib">
+    <None Include="../../Native/metal/bin/dotllm_kernels.metallib" Link="dotllm_kernels.metallib">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>%(Filename)%(Extension)</TargetPath>
-    </None>
-
-    <None Include="../../Native/metal/bin/libdotllmmetal.dylib" Link="kernels/libdotllmmetal.dylib">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <TargetPath>%(Filename)%(Extension)</TargetPath>
+      <TargetPath>dotllm_kernels.metallib</TargetPath>
     </None>
   </ItemGroup>
 
