@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using DotLLM.Metal;
+using DotLLM.Metal.Kernels;
 using Xunit;
 
 namespace DotLLM.Tests.Unit.Metal;

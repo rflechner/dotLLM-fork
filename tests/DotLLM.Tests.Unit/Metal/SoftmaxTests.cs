@@ -1,5 +1,6 @@
 using DotLLM.Cpu.Kernels;
 using DotLLM.Metal;
+using DotLLM.Metal.Kernels;
 using Xunit;
 
 namespace DotLLM.Tests.Unit.Metal;

@@ -3,7 +3,7 @@ using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Metal.Interop;
 
-namespace DotLLM.Metal;
+namespace DotLLM.Metal.Kernels;
 
 /// <summary>
 /// Rotary Position Embedding (RoPE) accelerated via Metal GPU.

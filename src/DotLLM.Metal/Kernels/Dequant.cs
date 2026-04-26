@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Metal.Interop;
 
-namespace DotLLM.Metal;
+namespace DotLLM.Metal.Kernels;
 
 /// <summary>
 /// Dequantization kernels accelerated via Metal GPU.

@@ -1,6 +1,6 @@
 using DotLLM.Metal;
 using Xunit;
-using Convert = DotLLM.Metal.Convert;
+using Convert = DotLLM.Metal.Kernels.Convert;
 
 namespace DotLLM.Tests.Unit.Metal;
 
