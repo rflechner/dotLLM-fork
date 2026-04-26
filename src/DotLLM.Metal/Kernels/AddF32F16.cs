@@ -2,20 +2,22 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Metal.Interop;
 
-namespace DotLLM.Metal;
+namespace DotLLM.Metal.Kernels;
 
 /// <summary>
-/// Element-wise FP32 vector addition accelerated via Metal GPU.
-/// Port of <c>add_f32.cu::add_f32</c>.
+/// Mixed-precision element-wise addition accelerated via Metal GPU:
+/// <c>result_f32[i] = a_f32[i] + b_f16[i]</c>.
+/// Used when adding an FP16 projection output into the FP32 residual stream.
+/// Port of <c>add_f32.cu::add_f32_f16</c>.
 /// </summary>
-public static class AddF32
+public static class AddF32F16
 {
     /// <summary>
-    /// Adds two FP32 vectors element-wise: <c>result[i] = a[i] + b[i]</c>.
+    /// Adds an FP32 vector and an FP16 vector element-wise into an FP32 output.
     /// </summary>
     /// <param name="ctx">The Metal context that owns the compiled pipeline.</param>
     /// <param name="a">First input vector (FP32).</param>
-    /// <param name="b">Second input vector (FP32).</param>
+    /// <param name="b">Second input vector (FP16).</param>
     /// <param name="result">Output span (FP32). Must be at least as long as <paramref name="a"/>.</param>
     /// <exception cref="ArgumentException">
     /// Thrown when input lengths differ or <paramref name="result"/> is too short.
@@ -24,7 +26,7 @@ public static class AddF32
     /// Thrown when the native Metal kernel returns a non-zero error code.
     /// </exception>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public static void Execute(MetalContext ctx, ReadOnlySpan<float> a, ReadOnlySpan<float> b, Span<float> result)
+    public static void Execute(MetalContext ctx, ReadOnlySpan<float> a, ReadOnlySpan<Half> b, Span<float> result)
     {
         if (a.Length != b.Length)
             throw new ArgumentException("Input spans must have the same length.");
@@ -35,15 +37,17 @@ public static class AddF32
         if (a.Length == 0)
             return;
 
+        var bU = MemoryMarshal.Cast<Half, ushort>(b);
+
         unsafe
         {
-            fixed (float* pA = a)
-            fixed (float* pB = b)
-            fixed (float* pR = result)
+            fixed (float*  pA = a)
+            fixed (ushort* pB = bU)
+            fixed (float*  pR = result)
             {
-                int code = MetalNative.AddF32(ctx.Handle, pA, pB, pR, (uint)a.Length);
+                int code = MetalNative.AddF32F16(ctx.Handle, pA, pB, pR, (uint)a.Length);
                 if (code != 0)
-                    throw new InvalidOperationException($"Metal add_f32 failed with code {code}.");
+                    throw new InvalidOperationException($"Metal add_f32_f16 failed with code {code}.");
             }
         }
     }

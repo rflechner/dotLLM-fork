@@ -1,7 +1,7 @@
 using System.Runtime.CompilerServices;
 using DotLLM.Metal.Interop;
 
-namespace DotLLM.Metal;
+namespace DotLLM.Metal.Kernels;
 
 /// <summary>
 /// Provides SILU Kernel with Metal GPU acceleration.

@@ -1,5 +1,6 @@
 using DotLLM.Core.Configuration;
 using DotLLM.Metal;
+using DotLLM.Metal.Kernels;
 using Xunit;
 
 // Shared tolerance for FP16 RoPE: one rotation with FP16 I/O → ~0.2 % relative error.

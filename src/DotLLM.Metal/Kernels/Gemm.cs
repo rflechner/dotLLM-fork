@@ -2,7 +2,7 @@ using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Metal.Interop;
 
-namespace DotLLM.Metal;
+namespace DotLLM.Metal.Kernels;
 
 /// <summary>
 /// General matrix-matrix multiplication accelerated via Metal Performance Shaders.
