@@ -45,7 +45,8 @@
       "Bash(nvcc -ptx -arch=compute_61 -o ptx/fused_add_rmsnorm.ptx kernels/fused_add_rmsnorm.cu)",
       "Bash(bash native/build.sh)",
       "Bash(./build.sh)",
-      "Bash(otool -L native/metal/bin/libdotllmmetal.dylib)"
+      "Bash(otool -L ./native/metal/bin/libdotllmmetal.dylib)",
+      "Bash(awk 'NR>=108 && NR<=170' ./src/DotLLM.Metal/Metal.md)"
     ]
   }
 }

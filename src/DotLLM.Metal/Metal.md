@@ -1,0 +1,356 @@
+# DotLLM.Metal — Apple Silicon GPU Backend
+
+This is the Metal backend for dotLLM, targeting the unified-memory GPU shipped
+with every Apple Silicon Mac (M1, M2, M3, M4 and successors).
+
+## Porting strategy: line-by-line CUDA mirror
+
+Every Metal compute kernel under `native/metal/*.metal` is a **deliberate,
+mechanical translation of its CUDA counterpart** in `native/kernels/*.cu`.
+No algorithmic changes were introduced during the port:
+
+- Identical reduction structure (warp / SIMD-group then cross-warp).
+- Identical quantization-format byte layouts (Q8_0, Q5_0, Q4_K, Q5_K, Q6_K).
+- Identical attention masking, RoPE math, and softmax stabilisation.
+
+The working assumption is: **if the CUDA kernel is mathematically correct,
+the Metal port is correct as well.** Bugs are inherited (and fixed) jointly
+on both backends.
+
+This convention has two practical consequences:
+
+1. The CUDA reference remains the source of truth. Any new model architecture
+   or kernel optimisation should land on CUDA first, then be mirrored here.
+2. Reading the corresponding `.cu` file alongside any `.metal` file is the
+   fastest way to understand what a kernel does.
+
+## Conversion reference
+
+The mechanical CUDA → Metal substitutions used throughout the port (thread
+identity attributes, warp reductions, math intrinsics, dispatch strategies,
+shared memory, pointer arithmetic on `device` pointers, grid-stride loops,
+…) are documented once, in detail, in:
+
+> [`native/metal/README.md`](../../native/metal/README.md)
+
+That document is the canonical reference for anything of the form *"how do
+I express this CUDA construct in Metal?"*. It is intentionally not duplicated
+here.
+
+If you are about to port a new kernel, read that file first.
+
+---
+
+## GEMM via Metal Performance Shaders
+
+### The gap GEMV could not fill
+
+The hand-ported quantized GEMV kernels (`quantized_gemv_q8_0`, `q5_0`, `q4_k`,
+`q5_k`, `q6_k`) cover **decode** — single-token forward passes where
+`seqLen = 1`, so each projection is a matrix × vector. They are not enough
+for **prefill**, where `seqLen` may be hundreds or thousands of tokens and
+every Q/K/V/O and FFN projection becomes a true matrix × matrix multiply.
+
+A second class of GEMM is needed for prefill, and writing a competitive
+matmul from scratch is a multi-week task.
+
+### Why `MPSMatrixMultiplication`
+
+Apple ships a heavily-tuned matrix-multiplication primitive as part of
+**Metal Performance Shaders** (MPS), the same framework that backs PyTorch
+on Apple Silicon. It is:
+
+- already optimised for every shipping Apple GPU generation,
+- maintained by Apple (we inherit improvements transparently),
+- callable directly from the Metal command-buffer encoder,
+- available in FP16 and FP32 variants out of the box.
+
+We expose it through two C entry points and a thin C# wrapper:
+
+```
+native/metal/bridge.mm                 dotllm_metal_gemm_f16 / _f32
+native/metal/dotllm_metal.h            (declarations)
+src/DotLLM.Metal/Interop/MetalNative.cs  GemmF16 / GemmF32 P/Invoke
+src/DotLLM.Metal/Gemm.cs               public static class Gemm
+```
+
+### Operation and layout convention
+
+The native function computes:
+
+```
+C = alpha · op(A) · op(B) + beta · C
+op(X) = Xᵀ if transpose_x != 0, else X
+```
+
+with row-major storage layouts (no transpose):
+
+```
+A : [m, k]
+B : [k, n]
+C : [m, n]
+```
+
+The `transpose_a` / `transpose_b` flags do not change storage — they only
+tell MPS to treat a matrix as transposed during the multiplication.
+
+#### Standard LLM projection layout
+
+Weight matrices in GGUF are stored as `[outputDim, inputDim]`. A projection
+`Y = X · Wᵀ` therefore maps to:
+
+| | rows | cols | transpose flag |
+|---|---|---|---|
+| A = X (activations) | `seqLen` | `inputDim` | 0 |
+| B = W (weights) | `outputDim` | `inputDim` | **1** |
+| C = Y (output) | `seqLen` | `outputDim` | (n/a) |
+
+So the call is `Gemm.ExecuteF16(ctx, x, w, y, m=seqLen, n=outputDim,
+k=inputDim, transposeA=false, transposeB=true, alpha=1, beta=0)`.
+
+This is the configuration the forward pass will use everywhere — Q/K/V/O
+projections, FFN gate/up/down, and the LM head. The `alpha`/`beta`
+parameters are kept in the API so a future fused residual-add path can
+accumulate (`beta = 1`) instead of overwriting.
+
+#### Visualising the transpose
+
+What lives in memory (both row-major):
+
+```
+        X : [m, k]                          W : [n, k]
+        ────── k columns ──────►            ────── k columns ──────►
+      ┌────────────────────────┐          ┌────────────────────────┐
+      │ x x x x x x x x x x x  │ ┐        │ w w w w w w w w w w w  │ ┐
+      │ x x x x x x x x x x x  │ m        │ w w w w w w w w w w w  │ n
+      │ x x x x x x x x x x x  │ rows     │ w w w w w w w w w w w  │ rows
+      │ x x x x x x x x x x x  │ ┘        │ w w w w w w w w w w w  │ ┘
+      └────────────────────────┘          └────────────────────────┘
+            transposeA = 0                       transposeB = 1
+            (read as-is)                         (treat as flipped)
+```
+
+The two `k` axes do not line up yet: textbook GEMM needs
+`A : [m, k] · B : [k, n]`, but `W` is stored as `[n, k]`. Setting
+`transposeB = 1` tells MPS to treat `W` as if its rows became columns —
+no data is moved, only the index mapping changes:
+
+```
+        op(A) = X        ·        op(B) = Wᵀ        =        C = Y
+      ┌────k────┐               ┌────n────┐                ┌────n────┐
+      │         │               │         │                │         │
+      │    m    │       ·       │    k    │       =        │    m    │
+      │         │               │         │                │         │
+      └─────────┘               └─────────┘                └─────────┘
+
+         k matches k → contracts away.   m × n remains in the result.
+```
+
+Per-element, the multiplication is:
+
+```
+                           k − 1
+        Y[i, j]  =          Σ        X[i, p] · W[j, p]
+                           p = 0
+                                    ▲           ▲
+                                    │           │
+                                row of X    row of W (the storage row,
+                                            because transposeB lets MPS
+                                            iterate it as if it were a column)
+```
+
+This is exactly the operation that should happen during a Q/K/V/O or FFN
+projection — and it is why every LLM call site uses the same
+`transposeA=false, transposeB=true` pair.
+
+### Build-time linkage
+
+`MetalPerformanceShaders.framework` is now linked into `libdotllmmetal.dylib`
+(`build.sh`). Verify with:
+
+```sh
+otool -L bin/libdotllmmetal.dylib | grep MetalPerformanceShaders
+```
+
+### What this does **not** cover
+
+`MPSMatrixMultiplication` operates on FP16 / FP32 inputs only. Quantized
+weights must be dequantized to FP16 before being multiplied this way — the
+strategy for that is part of the next milestone (`MetalWeights`, below).
+
+---
+
+## Phase 3 — MetalWeights (planned)
+
+`MetalWeights` is the GPU-side representation of every model parameter
+loaded from a GGUF file: per-layer Q/K/V/O and FFN matrices, RMSNorm
+scales, optional QK-norm and biases, the embedding table, the final norm,
+and the LM head.
+
+The class is structurally analogous to `CudaWeights` in the CUDA backend —
+intentionally so, to keep the two backends symmetric — but its
+implementation is dramatically simpler thanks to Apple Silicon's unified
+memory model.
+
+### Memory model: unified vs. discrete
+
+#### CUDA: discrete VRAM
+
+```
+┌──────────────────┐      PCIe       ┌──────────────────┐
+│   CPU / Host RAM │ ◄─────────────► │   GPU / VRAM     │
+│   ┌────────────┐ │   cudaMemcpy    │  ┌────────────┐  │
+│   │ mmap GGUF  │ │ ══════════════► │  │ Weights    │  │
+│   └────────────┘ │   (one-shot)    │  └────────────┘  │
+└──────────────────┘                 └──────────────────┘
+        ▲                                     ▲
+   host pointer                       device pointer (nint)
+   *ptr works                         *ptr → segfault
+```
+
+CUDA must allocate VRAM with `cudaMalloc` and copy every weight from the
+mmapped file into device memory once, at load time. The device pointer
+returned has **no meaning** in the host process — that is why
+`CudaWeights` exposes them as `nint`.
+
+#### Metal: unified RAM
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                   Unified system RAM                    │
+│       (CPU and GPU share the same physical pages)       │
+│                                                         │
+│   ┌──────────────────────────────────────────────┐      │
+│   │   mmap'd GGUF — Llama-7B Q4_K (~4 GB)        │      │
+│   └──────────────────────────────────────────────┘      │
+│        ▲                                ▲               │
+│        │ CPU reads directly             │ GPU reads     │
+│        │ (when needed)                  │ directly      │
+│                                                         │
+│        ──────────── one address ────────────            │
+│         (wrapped in MTLBuffer with newBuffer-           │
+│          WithBytesNoCopy → zero-copy)                   │
+└─────────────────────────────────────────────────────────┘
+```
+
+There is **no upload step**. The OS-mapped GGUF pages are the same physical
+RAM the GPU reads. Wrapping them in an `MTLBuffer` is metadata-only;
+demand-paging is handled by the kernel.
+
+### What `MetalWeights` will do, concretely
+
+1. Open the GGUF file (already memory-mapped by `DotLLM.Models.Gguf`).
+2. For each named tensor expected by the architecture
+   (`token_embd.weight`, `blk.{i}.attn_q.weight`, `blk.{i}.attn_norm.weight`,
+   …), resolve the offset in the mmap and store:
+   - the **pointer** (as `nint` — see below),
+   - the **`QuantizationType`** (Q4_K, Q5_K, FP16, FP32, …),
+   - the **dimensions** (`outputDim`, `inputDim` for projection matrices).
+3. Handle architecture-specific optionals:
+   - **Tied embedding** — when `output.weight` is absent, fall back to
+     `token_embd.weight` (Llama 3.2 1B/3B, small Qwen variants).
+   - **QK-norm** — `attn_q_norm.weight` and `attn_k_norm.weight` only
+     present in Qwen3 / Cohere; pointers default to `0`.
+   - **Biases** — Qwen2 has Q/K/V biases but no O bias; Llama has none.
+     Each bias slot is nullable.
+4. Compute a `TotalBytes` summary so the loader can warn the user if the
+   model is larger than available system RAM (it will still load, but
+   page heavily).
+5. Implement `IDisposable` and chain to the `GgufFile` lifetime — the
+   mmap **must** outlive `MetalWeights`.
+
+### Why `nint`, not `Half*` / `byte*`
+
+Even though Apple Silicon technically allows it, weight pointers are
+exposed as `nint` rather than typed `unsafe T*`. Three reasons:
+
+1. **Cross-backend symmetry.** `MetalLayerWeights` and `CudaLayerWeights`
+   share the same shape, so future abstractions (`IBackendWeights`,
+   diagnostics, per-tensor inspectors) work uniformly.
+2. **Opacity signal.** `nint` makes it explicit that this memory is for
+   GPU kernels to read; the CPU should not casually index into it. After
+   a kernel writes a buffer, GPU caches must be flushed (we do this via
+   `waitUntilCompleted` in the bridge today). Typed `Half*` would invite
+   `weights.X[0]`-style accesses that work *most* of the time and break
+   subtly when a kernel write hasn't completed yet.
+3. **Type safety is recovered elsewhere.** A `nint` carries no format
+   information by design — the format lives in
+   `(QuantizationType, OutputDim, InputDim)` next to the pointer. That
+   tuple is the actual schema; a `Half*` would lie about Q4_K data.
+
+### Storage strategy: which formats to keep
+
+For each weight matrix that arrives quantized, there is a design choice:
+
+| Strategy | Decode (GEMV) | Prefill (GEMM) | Memory | Load time |
+|----------|---------------|----------------|--------|-----------|
+| **A — quantized only** | quantized GEMV kernel | dequant-on-the-fly per call | minimal | instant (mmap) |
+| **B — FP16 only** | FP16 GEMV | MPS GEMM | ×3–4 | seconds–minutes (dequant pass) |
+| **C — hybrid** | quantized GEMV (kept) | MPS GEMM on FP16 copy | ×1.3–1.5 | medium |
+
+CUDA went with **C**. The recommendation for the first Metal milestone is
+to start with **B** (FP16 only) because:
+
+- only one code path through the forward pass,
+- exercises `MPSMatrixMultiplication` for every projection,
+- correctness can be validated end-to-end before optimising,
+- on Apple Silicon the unified memory makes the ×3–4 cost less painful
+  than on CUDA (no device VRAM ceiling, only system RAM).
+
+The shape of `MetalLayerWeights` is designed so adding the quantized
+fallback later is a non-breaking extension — extra `nint` slots and an
+extra `QuantizationType` per matrix.
+
+### Skeleton API (for reference)
+
+```csharp
+internal readonly struct MetalLayerWeights
+{
+    // Linear projections — pointers into GGUF mmap (or freshly-allocated FP16).
+    public readonly nint Q, K, V, O;
+    public readonly QuantizationType QType, KType, VType, OType;
+    public readonly int QOutputDim, QInputDim;
+    public readonly int KOutputDim, KInputDim;
+    public readonly int VOutputDim, VInputDim;
+    public readonly int OOutputDim, OInputDim;
+
+    public readonly nint Gate, Up, Down;
+    public readonly QuantizationType GateType, UpType, DownType;
+    public readonly int GateOutputDim, GateInputDim;
+    public readonly int UpOutputDim,   UpInputDim;
+    public readonly int DownOutputDim, DownInputDim;
+
+    // RMSNorm scales (FP16, mmap-direct).
+    public readonly nint AttnNormWeight;
+    public readonly nint FfnNormWeight;
+
+    // Optional — 0 when absent.
+    public readonly nint QNormWeight, KNormWeight;
+    public readonly nint QBias, KBias, VBias, OBias;
+    public readonly nint GateBias, UpBias, DownBias;
+}
+
+internal sealed class MetalWeights : IDisposable
+{
+    public MetalLayerWeights[] Layers { get; }
+
+    public nint TokenEmbedding { get; }
+    public QuantizationType TokenEmbedQuantType { get; }
+
+    public nint OutputNormWeight { get; }
+    public nint OutputWeight { get; }
+    public QuantizationType OutputQuantType { get; }
+    public int  OutputOutputDim { get; }
+    public int  OutputInputDim { get; }
+
+    public long TotalBytes { get; }
+
+    public static MetalWeights LoadFromGguf(GgufFile gguf, ModelConfig config);
+
+    public void Dispose();
+}
+```
+
+This is the same surface as `CudaLayerWeights` / `CudaWeights` — the only
+runtime difference is what the `nint` values point to: unified RAM here,
+discrete VRAM there.
