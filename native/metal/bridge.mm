@@ -1,5 +1,6 @@
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
+#import <MetalPerformanceShaders/MetalPerformanceShaders.h>
 #include <stdint.h>
 #include <string.h>
 #include "dotllm_metal.h"
@@ -1777,4 +1778,157 @@ extern "C" int dotllm_metal_convert_f32_to_f16(
     int32_t      n)
 {
     return run_convert_kernel(ctx, "convert_f32_to_f16", src, dst, n, sizeof(float), sizeof(uint16_t));
+}
+
+// ── GEMM via Metal Performance Shaders ───────────────────────────────────────
+//
+// C = alpha * op(A) * op(B) + beta * C
+//
+// op(X) = X        if transpose_x = 0
+// op(X) = X^T      if transpose_x = 1
+//
+// Matrix descriptors describe the *storage layout* (rows × columns × rowBytes).
+// The transpose flag tells MPS to treat the matrix as transposed during
+// the multiplication — the storage is unchanged.
+//
+// Standard LLM projection: Y[seqLen, N] = X[seqLen, K] · W[N, K]^T
+//   → m = seqLen, k = K (inputDim), n = N (outputDim)
+//   → A = X (no transpose), B = W (transpose B)
+//   → A descriptor: rows=m, columns=k, rowBytes=k*sizeof(elem)
+//   → B descriptor: rows=n, columns=k, rowBytes=k*sizeof(elem)
+//   → C descriptor: rows=m, columns=n, rowBytes=n*sizeof(elem)
+//
+// Element size: 2 bytes (half) or 4 bytes (float).
+
+static int run_gemm(
+    dotllm_metal_context* ctx,
+    MPSDataType  dataType,
+    size_t       elemSize,
+    const void*  a,
+    const void*  b,
+    void*        c,
+    int32_t      m,
+    int32_t      n,
+    int32_t      k,
+    int32_t      transpose_a,
+    int32_t      transpose_b,
+    float        alpha,
+    float        beta)
+{
+    @autoreleasepool {
+        if (!ctx || !a || !b || !c) return -10;
+        if (m <= 0 || n <= 0 || k <= 0) return -12;
+
+        // Storage rows/columns for each matrix.
+        // op(A) is m×k → if transposed, A is stored as k×m.
+        NSUInteger aRows = transpose_a ? (NSUInteger)k : (NSUInteger)m;
+        NSUInteger aCols = transpose_a ? (NSUInteger)m : (NSUInteger)k;
+        // op(B) is k×n → if transposed, B is stored as n×k.
+        NSUInteger bRows = transpose_b ? (NSUInteger)n : (NSUInteger)k;
+        NSUInteger bCols = transpose_b ? (NSUInteger)k : (NSUInteger)n;
+        NSUInteger cRows = (NSUInteger)m;
+        NSUInteger cCols = (NSUInteger)n;
+
+        NSUInteger aBytes = aRows * aCols * elemSize;
+        NSUInteger bBytes = bRows * bCols * elemSize;
+        NSUInteger cBytes = cRows * cCols * elemSize;
+
+        // Wrap host pointers directly — Apple Silicon unified memory.
+        // For C we use `newBufferWithBytes` (copy in) when beta != 0; otherwise
+        // the kernel overwrites and we still copy out at the end.
+        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:aBytes
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufB = [ctx->device newBufferWithBytes:b length:bBytes
+                                  options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufC;
+        if (beta != 0.0f) {
+            bufC = [ctx->device newBufferWithBytes:c length:cBytes
+                        options:MTLResourceStorageModeShared];
+        } else {
+            bufC = [ctx->device newBufferWithLength:cBytes
+                        options:MTLResourceStorageModeShared];
+        }
+        if (!bufA || !bufB || !bufC) return -7;
+
+        MPSMatrixDescriptor* descA = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:aRows
+                            columns:aCols
+                           rowBytes:aCols * elemSize
+                           dataType:dataType];
+        MPSMatrixDescriptor* descB = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:bRows
+                            columns:bCols
+                           rowBytes:bCols * elemSize
+                           dataType:dataType];
+        MPSMatrixDescriptor* descC = [MPSMatrixDescriptor
+            matrixDescriptorWithRows:cRows
+                            columns:cCols
+                           rowBytes:cCols * elemSize
+                           dataType:dataType];
+
+        MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:bufA descriptor:descA];
+        MPSMatrix* matB = [[MPSMatrix alloc] initWithBuffer:bufB descriptor:descB];
+        MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:bufC descriptor:descC];
+
+        MPSMatrixMultiplication* mm = [[MPSMatrixMultiplication alloc]
+            initWithDevice:ctx->device
+             transposeLeft:(transpose_a != 0)
+            transposeRight:(transpose_b != 0)
+                resultRows:(NSUInteger)m
+             resultColumns:(NSUInteger)n
+           interiorColumns:(NSUInteger)k
+                     alpha:(double)alpha
+                      beta:(double)beta];
+        if (!mm) return -3;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+
+        [mm encodeToCommandBuffer:cmd
+                      leftMatrix:matA
+                     rightMatrix:matB
+                    resultMatrix:matC];
+
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(c, bufC.contents, cBytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_gemm_f16(
+    dotllm_metal_context* ctx,
+    const uint16_t* a,
+    const uint16_t* b,
+    uint16_t*       c,
+    int32_t         m,
+    int32_t         n,
+    int32_t         k,
+    int32_t         transpose_a,
+    int32_t         transpose_b,
+    float           alpha,
+    float           beta)
+{
+    return run_gemm(ctx, MPSDataTypeFloat16, sizeof(uint16_t),
+                    a, b, c, m, n, k, transpose_a, transpose_b, alpha, beta);
+}
+
+extern "C" int dotllm_metal_gemm_f32(
+    dotllm_metal_context* ctx,
+    const float*    a,
+    const float*    b,
+    float*          c,
+    int32_t         m,
+    int32_t         n,
+    int32_t         k,
+    int32_t         transpose_a,
+    int32_t         transpose_b,
+    float           alpha,
+    float           beta)
+{
+    return run_gemm(ctx, MPSDataTypeFloat32, sizeof(float),
+                    a, b, c, m, n, k, transpose_a, transpose_b, alpha, beta);
 }

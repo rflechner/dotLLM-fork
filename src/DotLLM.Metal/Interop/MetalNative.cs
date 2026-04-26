@@ -452,4 +452,40 @@ internal static partial class MetalNative
         float*  src,
         ushort* dst,
         int     n);
+
+    // ── GEMM (Metal Performance Shaders) ────────────────────────────────────────
+
+    /// <summary>
+    /// FP16 GEMM via MPSMatrixMultiplication: C = alpha * op(A) * op(B) + beta * C.
+    /// Buffers passed as ushort* (same bit layout as Half).
+    /// transposeA / transposeB: pass 1 to transpose, 0 otherwise.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_gemm_f16")]
+    internal static unsafe partial int GemmF16(
+        nint    ctx,
+        ushort* a,
+        ushort* b,
+        ushort* c,
+        int     m,
+        int     n,
+        int     k,
+        int     transposeA,
+        int     transposeB,
+        float   alpha,
+        float   beta);
+
+    /// <summary>FP32 GEMM via MPSMatrixMultiplication: C = alpha * op(A) * op(B) + beta * C.</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_gemm_f32")]
+    internal static unsafe partial int GemmF32(
+        nint    ctx,
+        float*  a,
+        float*  b,
+        float*  c,
+        int     m,
+        int     n,
+        int     k,
+        int     transposeA,
+        int     transposeB,
+        float   alpha,
+        float   beta);
 }
