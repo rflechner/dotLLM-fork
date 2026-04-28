@@ -301,56 +301,106 @@ The shape of `MetalLayerWeights` is designed so adding the quantized
 fallback later is a non-breaking extension — extra `nint` slots and an
 extra `QuantizationType` per matrix.
 
-### Skeleton API (for reference)
+---
 
-```csharp
-internal readonly struct MetalLayerWeights
-{
-    // Linear projections — pointers into GGUF mmap (or freshly-allocated FP16).
-    public readonly nint Q, K, V, O;
-    public readonly QuantizationType QType, KType, VType, OType;
-    public readonly int QOutputDim, QInputDim;
-    public readonly int KOutputDim, KInputDim;
-    public readonly int VOutputDim, VInputDim;
-    public readonly int OOutputDim, OInputDim;
+## Phase 4 — MetalForwardState
 
-    public readonly nint Gate, Up, Down;
-    public readonly QuantizationType GateType, UpType, DownType;
-    public readonly int GateOutputDim, GateInputDim;
-    public readonly int UpOutputDim,   UpInputDim;
-    public readonly int DownOutputDim, DownInputDim;
+`MetalForwardState` holds the **pre-allocated scratch buffers** the forward
+pass writes into for each token: hidden state, residual, Q/K/V projections,
+attention output, FFN intermediates, logits. Where `MetalWeights` is the
+read-only side of the memory layout, `MetalForwardState` is the writable
+side.
 
-    // RMSNorm scales (FP16, mmap-direct).
-    public readonly nint AttnNormWeight;
-    public readonly nint FfnNormWeight;
+It is the direct counterpart of `CudaForwardState`. And — like
+`MetalWeights` — it is dramatically simpler than the CUDA equivalent
+**because Apple Silicon's unified memory eliminates every host/device
+boundary**. The structure stays identical; only the allocator changes.
 
-    // Optional — 0 when absent.
-    public readonly nint QNormWeight, KNormWeight;
-    public readonly nint QBias, KBias, VBias, OBias;
-    public readonly nint GateBias, UpBias, DownBias;
-}
+### Line-by-line comparison with `CudaForwardState`
 
-internal sealed class MetalWeights : IDisposable
-{
-    public MetalLayerWeights[] Layers { get; }
+The current implementation deliberately mirrors `CudaForwardState`
+field-by-field, so the forward pass code can stay symmetric across the two
+backends. The differences below are *all* of them — no other line of
+behaviour diverges.
 
-    public nint TokenEmbedding { get; }
-    public QuantizationType TokenEmbedQuantType { get; }
+| Aspect                       | `CudaForwardState`                       | `MetalForwardState`                                            |
+|------------------------------|------------------------------------------|----------------------------------------------------------------|
+| **Activation buffers**       | 11 buffers FP16                          | identical 11 buffers FP16                                      |
+| **Logits FP16 + FP32**       | yes                                      | yes                                                            |
+| **Token IDs / Positions**    | on device, copied from host              | unified RAM — **no H2D copy**                                  |
+| **Capacity growth**          | power-of-2 on `seqLen`                   | identical                                                      |
+| **Allocator**                | `cuMemAlloc_v2` / `cuMemFree_v2`         | `NativeMemory.AlignedAlloc` / `AlignedFree`                    |
+| **Synchronisation**          | single CUDA stream                       | already synchronous via `waitUntilCompleted` in the bridge     |
+| **`DequantScratch`**         | required for cuBLAS GEMM                 | depends on the chosen `IWeightLoadStrategy` (see below)        |
+| **Reading the logits**       | `cuMemcpyDtoH` → FP32 host               | direct host read (same physical pages)                         |
 
-    public nint OutputNormWeight { get; }
-    public nint OutputWeight { get; }
-    public QuantizationType OutputQuantType { get; }
-    public int  OutputOutputDim { get; }
-    public int  OutputInputDim { get; }
+### Why each row looks the way it does
 
-    public long TotalBytes { get; }
+**Allocator.** Apple Silicon does not need a driver call to obtain
+GPU-visible memory: any aligned heap allocation is already accessible to
+the GPU. `NativeMemory.AlignedAlloc` with a 64-byte alignment matches the
+project's existing convention (`CLAUDE.md`) and gives us back a `nint`
+that doubles as a host pointer and a Metal-buffer-wrappable address. This
+is the **single substantive difference** in the code: a search-and-replace
+on two lines.
 
-    public static MetalWeights LoadFromGguf(GgufFile gguf, ModelConfig config);
+**No host-to-device copies.** Token IDs and position indices are passed
+into the forward pass as `int[]`. On CUDA they have to be copied into
+device memory before any kernel can read them; on Metal the same array's
+pinned address is already GPU-visible. We still allocate `TokenIds` and
+`Positions` buffers in `MetalForwardState` for layout symmetry, but the
+copy step disappears.
 
-    public void Dispose();
-}
+**No stream / no inter-kernel sync.** CUDA chains every kernel on a single
+stream and only synchronises once per token. The current Metal bridge
+calls `waitUntilCompleted` inside every kernel invocation, so each call
+is already a synchronisation point from C#'s perspective.
+`MetalForwardState` does not need to know about streams at all. (A future
+optimisation will batch several kernels into a single
+`MTLCommandBuffer` to recover the asynchronous benefits — but that
+concerns the bridge, not the forward state.)
+
+**Logits read for free.** The final logits buffer lives in unified RAM,
+so the sampler reads it directly after the LM-head kernel completes.
+That saves a `cuMemcpyDtoH` of `vocabSize × 4 bytes` (≈ 500 KB for a
+128k vocabulary) per generated token.
+
+**`DequantScratch`.** This buffer holds one projection's worth of FP16
+weights when the forward pass needs to call `MPSMatrixMultiplication` on a
+matrix that is currently stored quantized. Whether it is needed depends
+on the loading strategy:
+
+| Loading strategy           | Needs `DequantScratch`? |
+|----------------------------|-------------------------|
+| `DequantToFp16Strategy`    | **No** — every weight is already FP16 in `MetalWeights` |
+| `HybridStrategy`           | **No** — same reason |
+| `MmapOnlyStrategy`         | **Yes**, *if* prefill goes through MPS GEMM (the only path that requires FP16 input) |
+
+The pragmatic choice is to **always allocate `DequantScratch`** on Metal,
+sized for the largest projection. Strategies that don't need it simply
+ignore the buffer, and the RAM cost is bounded (≈ 90 MB for Llama-7B,
+negligible against the model itself).
+
+### Why the implementation looks like a copy of `CudaForwardState`
+
+The diff between the two files is essentially:
+
+```diff
+- CudaDriverApi.cuMemAlloc_v2(out nint ptr, (nuint)bytes).ThrowOnError();
++ nint ptr = (nint)NativeMemory.AlignedAlloc((nuint)bytes, 64);
+
+- CudaDriverApi.cuMemFree_v2(ptr);
++ NativeMemory.AlignedFree((void*)ptr);
 ```
 
-This is the same surface as `CudaLayerWeights` / `CudaWeights` — the only
-runtime difference is what the `nint` values point to: unified RAM here,
-discrete VRAM there.
+Everything else — the buffer list, the field names, the
+power-of-2 capacity growth, the `EnsureCapacity` re-allocation pattern,
+the dispose order — transfers verbatim. Keeping the two files in
+lock-step is intentional: when a future change adjusts the buffer set on
+one backend (a new model architecture, a fused kernel, a per-head
+intermediate), the same change applies mechanically to the other.
+
+The asymmetries that *would* normally exist between a discrete-VRAM
+backend and a unified-memory backend (staging buffers, double-buffering,
+explicit transfer queues, host-pinned memory pools) all collapse to
+nothing here, because there is only one physical memory.
