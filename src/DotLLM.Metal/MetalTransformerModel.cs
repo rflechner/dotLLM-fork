@@ -6,6 +6,7 @@ using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Metal.Kernels;
 using DotLLM.Metal.Weights;
+using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 
 namespace DotLLM.Metal;
@@ -43,6 +44,68 @@ public sealed unsafe class MetalTransformerModel : IModel
 
     /// <inheritdoc/>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
+
+    /// <summary>
+    /// Loads a transformer model onto the GPU from an opened GGUF file.
+    /// </summary>
+    /// <param name="gguf">Opened GGUF file (must remain alive for model lifetime).</param>
+    /// <param name="config">Model configuration extracted from GGUF metadata.</param>
+    /// <param name="strategy"></param>
+    /// <param name="deviceId">GPU device ordinal (0-based).</param>
+    /// <param name="ptxDir">Directory containing compiled PTX files. If null, auto-detects from assembly location.</param>
+    public static MetalTransformerModel LoadFromGguf(
+        GgufFile gguf,
+        ModelConfig config,
+        IWeightLoadStrategy strategy,
+        int deviceId = 0,
+        string? ptxDir = null)
+    {
+        // Load CPU weights (mmap references only, no heavy allocation)
+        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
+
+        // Initialize CUDA
+        var context = new MetalContext();
+
+        // Resolve PTX directory
+        ptxDir ??= Path.Combine(AppContext.BaseDirectory, "ptx");
+
+        // Check VRAM before loading — warn if model likely exceeds available memory.
+        // Estimate: sum of quantized byte sizes for all GGUF tensors.
+        long estimatedWeightBytes = 0;
+        foreach (var t in gguf.TensorsByName.Values)
+        {
+            int innerDim = t.Shape[0];
+            long outerDim = (long)t.Shape.ElementCount / innerDim;
+            estimatedWeightBytes += Cpu.Kernels.Dequantize.RowByteSize(innerDim, t.QuantizationType) * outerDim;
+        }
+
+        long totalAvailableMemoryBytes = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes;
+
+        string? vramWarning = null;
+        if (totalAvailableMemoryBytes > 0 && estimatedWeightBytes > totalAvailableMemoryBytes)
+        {
+            long modelMb = estimatedWeightBytes / (1024 * 1024);
+            long totalMb = totalAvailableMemoryBytes / (1024 * 1024);
+            vramWarning = $"Model weights (~{modelMb} MB) exceed available RAM ({totalMb} MB). " +
+                          $"Performance will be degraded due to PCIe memory paging. " +
+                          $"Consider a smaller model or quantization format.";
+        }
+
+        // Upload weights to GPU
+        var weights = MetalWeights.LoadFromGguf(gguf, context, strategy);
+
+        // Create scratch buffers
+        var state = new MetalForwardState(
+            config.HiddenSize, config.NumAttentionHeads, config.NumKvHeads,
+            config.HeadDim, config.IntermediateSize, config.VocabSize);
+
+        int ropeDim = config.RoPEConfig?.DimensionCount ?? config.HeadDim;
+        if (ropeDim == 0) ropeDim = config.HeadDim;
+        float ropeTheta = config.RoPEConfig?.Theta ?? 10000.0f;
+        int ropeType = (int)(config.RoPEConfig?.Type ?? RoPEType.Norm);
+
+        return new MetalTransformerModel(weights, state, context, gguf, deviceId, ropeTheta, ropeDim, ropeType, config);
+    }
 
     /// <inheritdoc/>
     public ITensor Forward(ReadOnlySpan<int> tokenIds, ReadOnlySpan<int> positions, int deviceId)

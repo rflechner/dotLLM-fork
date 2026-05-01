@@ -57,23 +57,16 @@ public sealed class MetalWeights : IDisposable
         StrategyName      = strategyName;
     }
 
-    /// <summary>Default strategy: <see cref="MmapOnlyStrategy"/>.</summary>
-    public static MetalWeights LoadFromGguf(string path, MetalContext ctx)
-        => LoadFromGguf(path, ctx, new MmapOnlyStrategy());
-
     /// <summary>
     /// Loads model weights from a GGUF file using the specified <paramref name="strategy"/>
     /// to decide how each quantized projection is stored.
     /// </summary>
-    /// <param name="path">Path to the GGUF model file.</param>
+    /// <param name="gguf">GGUF model file.</param>
     /// <param name="ctx">Metal context (for kernel dispatch during dequantization).</param>
     /// <param name="strategy">Per-tensor storage policy.</param>
     public static MetalWeights LoadFromGguf(
-        string path, MetalContext ctx, IWeightLoadStrategy strategy)
+        GgufFile gguf, MetalContext ctx, IWeightLoadStrategy strategy)
     {
-        // NOTE: do *not* use `using var` here — the GgufFile must outlive
-        // this method. MetalWeights takes ownership and disposes it.
-        var gguf   = GgufFile.Open(path);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
 
         // Track every FP16 buffer the strategy allocates so we can free them later.
