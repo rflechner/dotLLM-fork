@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
@@ -8,6 +9,7 @@ using DotLLM.Metal.Kernels;
 using DotLLM.Metal.Weights;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
+using Convert = DotLLM.Metal.Kernels.Convert;
 
 namespace DotLLM.Metal;
 
@@ -141,10 +143,15 @@ public sealed unsafe class MetalTransformerModel : IModel
             _state.TokenIds, _state.HiddenState,
             seqLen, Config.HiddenSize, Config.VocabSize);
 
+        Check("after embedding", _state.HiddenState, seqLen * hiddenSize);   // ← #1
+
         // 3. Layer 0 setup
-        Memcpy(_state.Residual, _state.HiddenState, seqLen * hiddenSize * 2);
+        Memcpy(_state.Residual, _state.HiddenState, seqLen * hiddenSize);
+        Check("after memcpy residual", _state.Residual, seqLen * hiddenSize); // ← #2
+
         RmsNormF16.Execute(_context, _state.HiddenState, _weights.Layers[0].AttnNormWeight,
                            _state.NormOutput, hiddenSize, seqLen, eps);
+        Check("after first RmsNorm", _state.NormOutput, seqLen * hiddenSize); // ← #3
 
         // 4. Boucle des layers
         for (int layer = 0; layer < Config.NumLayers; layer++)
@@ -155,6 +162,11 @@ public sealed unsafe class MetalTransformerModel : IModel
             Project(lw.Q, _state.NormOutput, _state.Q, seqLen);
             Project(lw.K, _state.NormOutput, _state.K, seqLen);
             Project(lw.V, _state.NormOutput, _state.V, seqLen);
+            if (layer == 0) {
+                Check("L0: Q after proj", _state.Q, seqLen * lw.Q.OutputDim);  // ← #4
+                Check("L0: K after proj", _state.K, seqLen * lw.K.OutputDim);
+                Check("L0: V after proj", _state.V, seqLen * lw.V.OutputDim);
+            }
 
             // Biases optionnels
             if (lw.QBias != 0) BiasAddF16.Execute(_context, _state.Q, lw.QBias, lw.Q.OutputDim, seqLen);
@@ -170,26 +182,53 @@ public sealed unsafe class MetalTransformerModel : IModel
             RoPEF16.Execute(_context, _state.Q, _state.K, _state.Positions,
                              numHeads, numKvHeads, headDim,
                             _ropeDim, _ropeTheta, seqLen, (RoPEType)_ropeType);
+            if (layer == 0) {
+                Check("L0: Q after RoPE", _state.Q, seqLen * lw.Q.OutputDim); // ← #5
+                Check("L0: K after RoPE", _state.K, seqLen * lw.K.OutputDim);
+            }
 
             // KV cache + Attention (TODO : kvCache plus tard, pour la v1 attention sur K/V courants seulement)
             AttentionF16.Execute(_context, _state.Q, _state.K, _state.V, _state.AttnOutput,
                                  seqLen, seqLen, numHeads, numKvHeads, headDim,
                                  positionOffset: 0, slidingWindow: 0);
+            if (layer == 0) {
+                Check("L0: AttnOutput", _state.AttnOutput, seqLen * lw.Q.OutputDim); // ← #6
+            }
 
             // O projection
             Project(lw.O, _state.AttnOutput, _state.NormOutput, seqLen);
+            if (layer == 0) {
+                Check("L0: after O proj", _state.NormOutput, seqLen * hiddenSize); // ← #7
+            }
 
             // Residual + FFN-norm
+            //FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
+            //                        lw.FfnNormWeight, _state.NormOutput,
+            //                        hiddenSize, seqLen, eps);
+
             FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
-                                    lw.FfnNormWeight, _state.NormOutput,
-                                    hiddenSize, seqLen, eps);
+                lw.FfnNormWeight, _state.HiddenState,  // ← scratch différent
+                hiddenSize, seqLen, eps);
+            if (layer == 0) {
+                Check("L0: after FusedAddRmsNorm (FFN-norm)", _state.NormOutput, seqLen * hiddenSize); // ← #8
+                Check("L0: residual after fused-add", _state.Residual, seqLen * hiddenSize);
+            }
+
+            // puis copie HiddenState → NormOutput pour la suite
+            Memcpy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
 
             // FFN
             Project(lw.Gate, _state.NormOutput, _state.FfnGate, seqLen);
             Project(lw.Up,   _state.NormOutput, _state.FfnUp,   seqLen);
-            SwigluF16.Execute(_context, _state.FfnGate, _state.FfnUp, _state.SiluOutput,
-                              seqLen * Config.IntermediateSize);
+            SwigluF16.Execute(_context, _state.FfnGate, _state.FfnUp, _state.SiluOutput, seqLen * Config.IntermediateSize);
+            if (layer == 0) {
+                Check("L0: after SwiGLU", _state.SiluOutput, seqLen * Config.IntermediateSize); // ← #9
+            }
+
             Project(lw.Down, _state.SiluOutput, _state.NormOutput, seqLen);
+            if (layer == 0) {
+                Check("L0: after Down proj", _state.NormOutput, seqLen * hiddenSize); // ← #10
+            }
 
             // Residual + norme attn du layer suivant (sauf au dernier)
             if (layer + 1 < Config.NumLayers)
@@ -201,26 +240,30 @@ public sealed unsafe class MetalTransformerModel : IModel
             }
         }
 
+        Check("after layer loop: Residual", _state.Residual, seqLen * hiddenSize); // ← #11
+
         // 5. Final RmsNorm — last token only
         nint lastHidden = _state.Residual + (nint)((seqLen - 1) * hiddenSize * 2);
         RmsNormF16.Execute(_context, lastHidden, _weights.OutputNormWeight,
                            _state.NormOutput, hiddenSize, 1, eps);
+        Check("after final RmsNorm", _state.NormOutput, hiddenSize); // ← #12
 
         // 6. LM head → vocab logits
         Project(_weights.LmHead, _state.NormOutput, _state.LogitsF16, seqLen: 1);
+        Check("LogitsF16", _state.LogitsF16, vocabSize); // ← #13
 
         // 7. F16 → F32 pour le sampler
-        EmbeddingLookup.F16ToF32(
-            _context,
-            _state.LogitsF16,
-            _state.TokenIds,
-            _state.LogitsF32,
-            vocabSize,
-            hiddenSize,
-            seqLen);
+        // 7. F16 → F32 pour le sampler (vocabSize logits, dernier token uniquement)
+        Convert.F16ToF32(_context, _state.LogitsF16, _state.LogitsF32, vocabSize);
+        Check("LogitsF32", _state.LogitsF32, vocabSize, isFp16: false); // ← #14
 
         // 8. Wrap en ITensor (host-readable directement, pas de D2H grâce à la mémoire unifiée)
-        return new MetalTensor(_state.LogitsF32, vocabSize);
+        return new MetalTensor(
+            shape: new TensorShape(1, vocabSize),
+            dtype: DType.Float32,
+            deviceId: _deviceId,
+            ptr: _state.LogitsF32,
+            ownsMemory: false);
     }
 
     // Dans MetalTransformerModel
@@ -345,6 +388,56 @@ public sealed unsafe class MetalTransformerModel : IModel
             throw new InvalidOperationException(
                 $"Cannot dequantize {format}: element count {value} must be divisible by {divisor}.");
         }
+    }
+
+    [Conditional("DEBUG")]
+    private static unsafe void Check(string label, nint ptr, int count, bool isFp16 = true)
+    {
+        int nans = 0, infs = 0, zeros = 0;
+        float min = float.MaxValue, max = float.MinValue;
+        double sumAbs = 0;
+
+        if (isFp16)
+        {
+            var span = new ReadOnlySpan<Half>((void*)ptr, count);
+            foreach (var h in span)
+            {
+                float v = (float)h;
+                if (float.IsNaN(v))      nans++;
+                else if (float.IsInfinity(v)) infs++;
+                else
+                {
+                    if (v == 0f) zeros++;
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                    sumAbs += Math.Abs(v);
+                }
+            }
+        }
+        else
+        {
+            var span = new ReadOnlySpan<float>((void*)ptr, count);
+            foreach (var v in span)
+            {
+                if (float.IsNaN(v))      nans++;
+                else if (float.IsInfinity(v)) infs++;
+                else
+                {
+                    if (v == 0f) zeros++;
+                    if (v < min) min = v;
+                    if (v > max) max = v;
+                    sumAbs += Math.Abs(v);
+                }
+            }
+        }
+
+        bool isBad = nans > 0 || infs > 0;
+        if (!isBad) return;
+
+        string status = isBad ? "💥 BAD" : "ok";
+        Console.WriteLine(
+            $"[{label,-30}] {status}  nans={nans,-5} infs={infs,-5} zeros={zeros,-5} " +
+            $"range=[{min,8:F3}, {max,8:F3}]  meanAbs={sumAbs/Math.Max(1, count - nans - infs):F3}");
     }
 
     /// <summary>
