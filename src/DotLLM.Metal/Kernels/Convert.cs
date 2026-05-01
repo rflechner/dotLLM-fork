@@ -44,6 +44,20 @@ public static class Convert
     }
 
     /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers from
+    /// <see cref="MetalForwardState"/> directly. No length validation.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void F16ToF32(MetalContext ctx, nint src, nint dst, int n)
+    {
+        if (n <= 0) return;
+
+        int code = MetalNative.ConvertF16ToF32(ctx.Handle, (ushort*)src, (float*)dst, n);
+        if (code != 0)
+            throw new InvalidOperationException($"Metal convert_f16_to_f32 failed with code {code}.");
+    }
+
+    /// <summary>
     /// Converts <paramref name="n"/> float32 values to float16.
     /// Values outside the float16 range (±65504) saturate to ±infinity.
     /// Precision is reduced to ~3 significant decimal digits.
