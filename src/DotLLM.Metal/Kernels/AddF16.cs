@@ -52,4 +52,16 @@ public static class AddF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(MetalContext ctx, nint a, nint b, nint result, uint seqLen)
+    {
+        int code = MetalNative.AddF16(ctx.Handle, (ushort*)a, (ushort*)b, (ushort*)result, seqLen);
+        if (code != 0)
+            throw new InvalidOperationException($"Metal add_f16 failed with code {code}.");
+
+    }
 }

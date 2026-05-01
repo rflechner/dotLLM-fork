@@ -202,15 +202,11 @@ public sealed unsafe class MetalTransformerModel : IModel
             }
 
             // Residual + FFN-norm
-            //FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
-            //                        lw.FfnNormWeight, _state.NormOutput,
-            //                        hiddenSize, seqLen, eps);
-
             FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
-                lw.FfnNormWeight, _state.HiddenState,  // ← scratch différent
+                lw.FfnNormWeight, _state.HiddenState,
                 hiddenSize, seqLen, eps);
             if (layer == 0) {
-                Check("L0: after FusedAddRmsNorm (FFN-norm)", _state.NormOutput, seqLen * hiddenSize); // ← #8
+                Check("L0: after FusedAddRmsNorm (FFN-norm)", _state.HiddenState, seqLen * hiddenSize); // ← #8
                 Check("L0: residual after fused-add", _state.Residual, seqLen * hiddenSize);
             }
 
@@ -231,21 +227,52 @@ public sealed unsafe class MetalTransformerModel : IModel
             }
 
             // Residual + norme attn du layer suivant (sauf au dernier)
+            // if (layer + 1 < Config.NumLayers)
+            // {
+            //     ref readonly var nextLw = ref _weights.Layers[layer + 1];
+            //     FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
+            //                             nextLw.AttnNormWeight, _state.NormOutput,
+            //                             hiddenSize, seqLen, eps);
+            // }
+
+            // Residual + norme attn du layer suivant.
+            // On the final layer, produce final hidden state = residual + FFN output.
             if (layer + 1 < Config.NumLayers)
             {
                 ref readonly var nextLw = ref _weights.Layers[layer + 1];
-                FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
-                                        nextLw.AttnNormWeight, _state.NormOutput,
-                                        hiddenSize, seqLen, eps);
+
+                FusedAddRmsNorm.Execute(
+                    _context,
+                    _state.Residual,
+                    _state.NormOutput,
+                    nextLw.AttnNormWeight,
+                    _state.HiddenState,
+                    hiddenSize,
+                    seqLen,
+                    eps);
+
+                Memcpy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
+            }
+            else
+            {
+                AddF16.Execute(
+                    _context,
+                    _state.Residual,
+                    _state.NormOutput,
+                    _state.HiddenState,
+                    (uint)(seqLen * hiddenSize));
             }
         }
 
         Check("after layer loop: Residual", _state.Residual, seqLen * hiddenSize); // ← #11
 
         // 5. Final RmsNorm — last token only
-        nint lastHidden = _state.Residual + (nint)((seqLen - 1) * hiddenSize * 2);
+        //nint lastHidden = _state.Residual + (seqLen - 1) * hiddenSize * 2;
+        nint lastHidden = _state.HiddenState + (nint)((seqLen - 1) * hiddenSize * sizeof(ushort));
+
         RmsNormF16.Execute(_context, lastHidden, _weights.OutputNormWeight,
                            _state.NormOutput, hiddenSize, 1, eps);
+
         Check("after final RmsNorm", _state.NormOutput, hiddenSize); // ← #12
 
         // 6. LM head → vocab logits

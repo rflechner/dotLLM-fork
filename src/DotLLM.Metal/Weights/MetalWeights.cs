@@ -4,6 +4,7 @@ using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
 using DotLLM.Metal.Weights.Strategies;
 using DotLLM.Models.Gguf;
+using static DotLLM.Metal.Helpers.LoadGgufHelpers;
 
 namespace DotLLM.Metal.Weights;
 
@@ -82,7 +83,7 @@ public sealed class MetalWeights : IDisposable
             var tokenEmbedding = LoadProjection(ctx, gguf, "token_embd.weight", strategy, owned);
 
             // Output norm — always FP16, mmap-direct.
-            nint outNorm = ResolvePointer(gguf, "output_norm.weight");
+            nint outNorm = LoadVectorFp16(gguf, "output_norm.weight", owned);
 
             // LM head — falls back to token_embd when tied (Llama 3.2 1B/3B, small Qwen).
             bool hasOutput = gguf.TensorsByName.ContainsKey("output.weight");
@@ -139,21 +140,21 @@ public sealed class MetalWeights : IDisposable
             Down = LoadProjection(ctx, gguf, $"blk.{i}.ffn_down.weight", strategy, owned),
 
             // RMSNorm scales — required.
-            AttnNormWeight = ResolvePointer(gguf, $"blk.{i}.attn_norm.weight"),
-            FfnNormWeight  = ResolvePointer(gguf, $"blk.{i}.ffn_norm.weight"),
+            AttnNormWeight = LoadVectorFp16(gguf, $"blk.{i}.attn_norm.weight", owned),
+            FfnNormWeight  = LoadVectorFp16(gguf, $"blk.{i}.ffn_norm.weight", owned),
 
             // QK-norm — optional (Qwen3, Cohere).
-            QNormWeight = TryResolvePointer(gguf, $"blk.{i}.attn_q_norm.weight"),
-            KNormWeight = TryResolvePointer(gguf, $"blk.{i}.attn_k_norm.weight"),
+            QNormWeight = TryLoadVectorFp16(gguf, $"blk.{i}.attn_q_norm.weight", owned),
+            KNormWeight = TryLoadVectorFp16(gguf, $"blk.{i}.attn_k_norm.weight", owned),
 
             // Biases — optional (Qwen2 Q/K/V).
-            QBias    = TryResolvePointer(gguf, $"blk.{i}.attn_q.bias"),
-            KBias    = TryResolvePointer(gguf, $"blk.{i}.attn_k.bias"),
-            VBias    = TryResolvePointer(gguf, $"blk.{i}.attn_v.bias"),
-            OBias    = TryResolvePointer(gguf, $"blk.{i}.attn_output.bias"),
-            GateBias = TryResolvePointer(gguf, $"blk.{i}.ffn_gate.bias"),
-            UpBias   = TryResolvePointer(gguf, $"blk.{i}.ffn_up.bias"),
-            DownBias = TryResolvePointer(gguf, $"blk.{i}.ffn_down.bias"),
+            QBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_q.bias", owned),
+            KBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_k.bias", owned),
+            VBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_v.bias", owned),
+            OBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_output.bias", owned),
+            GateBias = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_gate.bias", owned),
+            UpBias   = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_up.bias", owned),
+            DownBias = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_down.bias", owned),
         };
     }
 
@@ -181,9 +182,6 @@ public sealed class MetalWeights : IDisposable
 
         // GGUF projection tensors are stored as [outputDim, inputDim] (row-major).
         // 1-D tensors (norms, biases) collapse inputDim to 1.
-//        int outputDim = (int)desc.Shape.Dimensions[0];
-//        int inputDim  = desc.Shape.Dimensions.Length > 1 ? (int)desc.Shape.Dimensions[1] : 1;
-
         int outputDim;
         int inputDim;
 
