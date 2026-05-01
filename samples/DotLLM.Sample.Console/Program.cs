@@ -40,18 +40,19 @@ var options = new InferenceOptions
 {
     SamplerSteps =
     [
-        new TemperatureSampler(0.8f),
-        new TopKSampler(40),
-        new TopPSampler(0.95f),
-        new MinPSampler(0.05f)
+        // new TemperatureSampler(0.8f),
+        // new TopKSampler(40),
+        // new TopPSampler(0.95f),
+        // new MinPSampler(0.05f)
     ],
     StopConditions =
     [
         new EosStopCondition(tokenizer.EosTokenId),
-        new MaxTokensStopCondition(128)
+        new MaxTokensStopCondition(1)
     ],
     Seed = 42,
-    MaxTokens = 128
+    MaxTokens = 1,
+    Temperature = 0.0f,
 };
 
 // --- Streaming generation via IAsyncEnumerable ---
@@ -104,7 +105,7 @@ ModelRunContext LoadModel()
 
     if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
     {
-        return MetalModelLoader.LoadFromGguf(modelPath, new HybridStrategy());
+        return MetalModelLoader.LoadFromGguf(modelPath, new DequantToFp16Strategy());
     }
 
     return LoadModelFromCpu();
