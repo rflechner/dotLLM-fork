@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using DotLLM.Core.Configuration;
 using DotLLM.Metal.Interop;
 
 namespace DotLLM.Metal.Kernels;
@@ -80,6 +81,27 @@ public static class EmbeddingLookup
     }
 
     /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void F16ToF32(
+        MetalContext ctx,
+        nint embedTable,
+        nint tokenIds,
+        nint output,
+        int vocabSize,
+        int hiddenSize,
+        int seqLen)
+    {
+        int code = MetalNative.EmbeddingF16F32Out(
+            ctx.Handle, (ushort*)embedTable, (int*)tokenIds, (float*)output, vocabSize, hiddenSize, seqLen);
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal embedding_f16_f32out failed with code {code}.");
+        }
+    }
+
+    /// <summary>
     /// Embedding lookup from a Q8_0 quantized table — dequantize to float32 on the GPU.
     /// Each block is 34 bytes: 2-byte half scale followed by 32 int8 weights.
     /// </summary>
@@ -142,5 +164,54 @@ public static class EmbeddingLookup
         if (output.Length != seqLen * hiddenSize)
             throw new ArgumentException(
                 $"output.Length ({output.Length}) must equal seqLen × hiddenSize ({seqLen * hiddenSize}).");
+    }
+
+    /// <summary>
+    /// Forward-pass entry point. Dispatches to the right native kernel based on the
+    /// embedding table's storage format. Uses raw <see cref="nint"/> pointers because
+    /// in the forward pass the inputs/outputs already live in
+    /// <see cref="MetalForwardState"/> as native allocations, not managed spans.
+    /// </summary>
+    /// <param name="ctx">Metal context.</param>
+    /// <param name="embedTable">Pointer to the start of the embedding table.</param>
+    /// <param name="embedDtype">Storage format of the table (F32, F16, or Q8_0 today).</param>
+    /// <param name="tokenIds">Pointer to <c>seqLen</c> int32 token IDs.</param>
+    /// <param name="output">Pointer to the FP32 output buffer of size <c>seqLen × hiddenSize</c>.</param>
+    /// <param name="seqLen">Number of tokens to look up.</param>
+    /// <param name="hiddenSize">Embedding dimension.</param>
+    /// <param name="vocabSize">Number of rows in the embedding table.</param>
+    /// <exception cref="NotSupportedException">If the table format has no kernel yet (e.g. Q4_K, Q5_K).</exception>
+    public static unsafe void Execute(
+        MetalContext     ctx,
+        nint             embedTable,
+        QuantizationType embedDtype,
+        nint             tokenIds,
+        nint             output,
+        int              seqLen,
+        int              hiddenSize,
+        int              vocabSize)
+    {
+        int code = embedDtype switch
+        {
+            QuantizationType.F32  => MetalNative.EmbeddingF32F32Out(
+                ctx.Handle, (float*)embedTable,  (int*)tokenIds, (float*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            QuantizationType.F16  => MetalNative.EmbeddingF16F32Out(
+                ctx.Handle, (ushort*)embedTable, (int*)tokenIds, (float*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            QuantizationType.Q8_0 => MetalNative.EmbeddingQ8_0F32Out(
+                ctx.Handle, (byte*)embedTable,   (int*)tokenIds, (float*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            _ => throw new NotSupportedException(
+                $"Embedding type {embedDtype} not supported on Metal yet. " +
+                $"Add a dedicated kernel or load the model with DequantToFp16Strategy."),
+        };
+
+        if (code != 0)
+            throw new InvalidOperationException(
+                $"Metal embedding_{embedDtype}_f32out failed with code {code}.");
     }
 }

@@ -89,6 +89,36 @@ public static class AttentionF16
         if (vLen != expKv)  throw new ArgumentException($"v.Length ({vLen}) must equal {expKv}.");
         if (outLen != expQ) throw new ArgumentException($"output.Length ({outLen}) must equal {expQ}.");
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(
+        MetalContext ctx,
+        nint q,
+        nint k,
+        nint v,
+        nint output,
+        int seqQ,
+        int seqKv,
+        int numHeads,
+        int numKvHeads,
+        int headDim,
+        int positionOffset,
+        int slidingWindow = 0)
+    {
+        int code = MetalNative.AttentionF16(
+            ctx.Handle,
+            (ushort*)q, (ushort*)k, (ushort*)v, (ushort*)output,
+            seqQ, seqKv, numHeads, numKvHeads, headDim,
+            positionOffset, slidingWindow);
+
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal attention_f16 failed with code {code}.");
+        }
+    }
 }
 
 /// <summary>

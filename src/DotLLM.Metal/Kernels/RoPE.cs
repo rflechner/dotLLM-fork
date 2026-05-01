@@ -124,6 +124,7 @@ public static class RoPEF16
     /// <param name="ropeDim">Number of dimensions to rotate (must be even, &lt;= <paramref name="headDim"/>).</param>
     /// <param name="theta">Base frequency (e.g. 10000 for Llama 2, 500000 for Llama 3).</param>
     /// <param name="ropeType"><see cref="RoPEType.Norm"/> for Llama/Mistral, <see cref="RoPEType.NeoX"/> for Qwen/Phi.</param>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void Execute(
         MetalContext ctx,
         Span<Half> q,
@@ -171,4 +172,36 @@ public static class RoPEF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(
+        MetalContext ctx,
+        nint q,
+        nint k,
+        nint positions,
+        int numHeads,
+        int numKvHeads,
+        int headDim,
+        int ropeDim,
+        float theta,
+        int seqLen,
+        RoPEType ropeType = RoPEType.Norm)
+    {
+        if (seqLen == 0) return;
+
+        int ropeTypeInt = ropeType == RoPEType.NeoX ? 1 : 0;
+
+        int code = MetalNative.RoPEF16(
+            ctx.Handle,
+            (ushort*)q, (ushort*)k, (int*)positions,
+            seqLen, numHeads, numKvHeads, headDim, ropeDim,
+            theta, ropeTypeInt);
+
+        if (code != 0)
+            throw new InvalidOperationException($"Metal rope_f16 failed with code {code}.");
+    }
+
 }

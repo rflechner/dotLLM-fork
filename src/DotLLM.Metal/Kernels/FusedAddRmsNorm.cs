@@ -78,4 +78,26 @@ public static class FusedAddRmsNorm
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(
+        MetalContext ctx,
+        nint residual,
+        nint x,
+        nint weight,
+        nint output,
+        int n,
+        int seqLen,
+        float eps = 1e-5f)
+    {
+        int code = MetalNative.FusedAddRmsNormF16(ctx.Handle, (ushort*)residual, (ushort*)x, (ushort*)weight, (ushort*)output, n, seqLen, eps);
+
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal fused_add_rmsnorm_f16 failed with code {code}.");
+        }
+    }
 }

@@ -116,4 +116,28 @@ public static class PerHeadRmsNormF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(
+        MetalContext       ctx,
+        nint               qk,
+        nint               weight,
+        int                numHeads,
+        int                headDim,
+        int                seqLen,
+        float              eps = 1e-5f)
+    {
+        if (seqLen == 0) return;
+
+        int code = MetalNative.PerHeadRmsNormF16(
+            ctx.Handle, (ushort*)qk, (ushort*)weight, numHeads, headDim, seqLen, eps);
+
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal per_head_rmsnorm_f16 failed with code {code}.");
+        }
+    }
 }

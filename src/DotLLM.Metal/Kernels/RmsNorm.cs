@@ -113,6 +113,32 @@ public static class RmsNormF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(
+        MetalContext ctx,
+        nint  input,
+        nint  weight,
+        nint  output,
+        int   n,
+        int   seqLen,
+        float eps = 1e-5f)
+    {
+        if (seqLen == 0) return;
+
+        int code = MetalNative.RmsNormF16(
+            ctx.Handle,
+            (ushort*)input,
+            (ushort*)weight,
+            (ushort*)output,
+            n, seqLen, eps);
+
+        if (code != 0)
+            throw new InvalidOperationException($"Metal rmsnorm_f16 failed with code {code}.");
+    }
 }
 
 /// <summary>
