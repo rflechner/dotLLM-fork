@@ -181,8 +181,22 @@ public sealed class MetalWeights : IDisposable
 
         // GGUF projection tensors are stored as [outputDim, inputDim] (row-major).
         // 1-D tensors (norms, biases) collapse inputDim to 1.
-        int outputDim = (int)desc.Shape.Dimensions[0];
-        int inputDim  = desc.Shape.Dimensions.Length > 1 ? (int)desc.Shape.Dimensions[1] : 1;
+//        int outputDim = (int)desc.Shape.Dimensions[0];
+//        int inputDim  = desc.Shape.Dimensions.Length > 1 ? (int)desc.Shape.Dimensions[1] : 1;
+
+        int outputDim;
+        int inputDim;
+
+        if (desc.Shape.Dimensions.Length > 1)
+        {
+            outputDim = desc.Shape.Dimensions[1];
+            inputDim = desc.Shape.Dimensions[0];
+        }
+        else
+        {
+            outputDim = desc.Shape.Dimensions[0];
+            inputDim = 1;
+        }
 
         // Total bytes = bytes-per-row × number-of-rows.
         long byteLen = Dequantize.RowByteSize(inputDim, desc.QuantizationType) * outputDim;
