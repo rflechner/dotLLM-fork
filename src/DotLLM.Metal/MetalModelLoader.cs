@@ -1,5 +1,6 @@
 using DotLLM.Core.Models;
 using DotLLM.Metal.Weights;
+using DotLLM.Models;
 using DotLLM.Models.Gguf;
 
 namespace DotLLM.Metal;
@@ -16,13 +17,13 @@ public class MetalModelLoader
     /// <param name="strategy"></param>
     /// <param name="ptxDir">Directory containing compiled PTX files. Null for auto-detect.</param>
     /// <returns>The loaded model, GGUF file handle, and model configuration.</returns>
-    public static (MetalTransformerModel Model, GgufFile Gguf, ModelConfig Config) LoadFromGguf(
+    public static ModelRunContext LoadFromGguf(
         string path, IWeightLoadStrategy strategy, string? ptxDir = null)
     {
         var gguf = GgufFile.Open(path);
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var model = MetalTransformerModel.LoadFromGguf(gguf, config, strategy, ptxDir: ptxDir);
 
-        return (model, gguf, config);
+        return new ModelRunContext(model, gguf, config);
     }
 }
