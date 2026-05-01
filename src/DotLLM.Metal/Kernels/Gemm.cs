@@ -61,6 +61,32 @@ public static class Gemm
         }
     }
 
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void ExecuteF16(
+        MetalContext ctx,
+        nint a,
+        nint b,
+        nint c,
+        int m,
+        int n,
+        int k,
+        bool transposeA = false,
+        bool transposeB = false,
+        float alpha = 1.0f,
+        float beta = 0.0f)
+    {
+        int code = MetalNative.GemmF16(
+            ctx.Handle, (ushort*)a, (ushort*)b, (ushort*)c, m, n, k,
+            transposeA ? 1 : 0, transposeB ? 1 : 0, alpha, beta);
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal gemm_f16 failed with code {code}.");
+        }
+    }
+
     /// <summary>FP32 GEMM.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void ExecuteF32(

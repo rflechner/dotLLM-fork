@@ -99,4 +99,15 @@ public static class SwigluF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(MetalContext ctx, nint gate, nint up, nint result, int gateLength)
+    {
+        int code = MetalNative.SwigluF16(ctx.Handle, (ushort*)gate, (ushort*)up, (ushort*)result, (uint)gateLength);
+        if (code != 0)
+            throw new InvalidOperationException($"Metal swiglu_f16 failed with code {code}.");
+    }
 }

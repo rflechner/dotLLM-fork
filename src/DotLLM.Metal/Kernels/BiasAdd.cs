@@ -104,4 +104,16 @@ public static class BiasAddF16
             }
         }
     }
+
+    /// <summary>
+    /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void Execute(MetalContext ctx, nint output, nint bias, int dim, int seqLen)
+    {
+        int code = MetalNative.BiasAddF16(ctx.Handle, (ushort*)output, (ushort*)bias, (uint)dim, (uint)seqLen);
+        if (code != 0)
+            throw new InvalidOperationException($"Metal bias_add_f16 failed with code {code}.");
+    }
+
 }

@@ -1,5 +1,6 @@
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using DotLLM.Core.Configuration;
 using DotLLM.Metal.Interop;
 
 namespace DotLLM.Metal.Kernels;
@@ -266,6 +267,64 @@ public static class QuantizedGemv
                     throw new InvalidOperationException(
                         $"Metal quantized_gemv_q6_k failed with code {code}.");
             }
+        }
+    }
+
+    /// <summary>
+    /// Returns true if the given quantization format is supported.
+    /// </summary>
+    /// <param name="wQuantizedFormat"></param>
+    /// <returns></returns>
+    public static bool Supports(QuantizationType wQuantizedFormat)
+    {
+        return wQuantizedFormat is
+            QuantizationType.Q8_0 or
+            QuantizationType.Q5_0 or
+            QuantizationType.Q4_K or
+            QuantizationType.Q5_K or
+            QuantizationType.Q6_K;
+    }
+
+    /// <summary>
+    /// Dispatches a kernel to perform a quantized matrix-vector multiplication.
+    /// </summary>
+    /// <param name="context"></param>
+    /// <param name="format"></param>
+    /// <param name="w"></param>
+    /// <param name="x"></param>
+    /// <param name="y"></param>
+    /// <param name="n"></param>
+    /// <param name="k"></param>
+    /// <exception cref="NotSupportedException"></exception>
+    /// <exception cref="InvalidOperationException"></exception>
+    public static unsafe void Dispatch(MetalContext context, QuantizationType format,
+        nint w, nint x, nint y, int n, int k)
+    {
+        int code;
+        switch (format)
+        {
+            case QuantizationType.Q8_0:
+                code = MetalNative.QuantizedGemvQ8_0(context.Handle, (byte*)w, (ushort*)x, (ushort*)y, n, k);
+                break;
+            case QuantizationType.Q5_0:
+                code = MetalNative.QuantizedGemvQ5_0(context.Handle, (byte*)w, (ushort*)x, (ushort*)y, n, k);
+                break;
+            case QuantizationType.Q4_K:
+                code = MetalNative.QuantizedGemvQ4_K(context.Handle, (byte*)w, (ushort*)x, (ushort*)y, n, k);
+                break;
+            case QuantizationType.Q5_K:
+                code = MetalNative.QuantizedGemvQ5_K(context.Handle, (byte*)w, (ushort*)x, (ushort*)y, n, k);
+                break;
+            case QuantizationType.Q6_K:
+                code = MetalNative.QuantizedGemvQ6_K(context.Handle, (byte*)w, (ushort*)x, (ushort*)y, n, k);
+                break;
+            default:
+                throw new NotSupportedException($"Quantized GEMV not supported for {format}.");
+        }
+
+        if (code != 0)
+        {
+            throw new InvalidOperationException($"Metal quantized_gemv_q8_0 failed with code {code}.");
         }
     }
 }

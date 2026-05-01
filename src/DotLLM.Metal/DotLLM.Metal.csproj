@@ -38,7 +38,7 @@
 
   <ItemGroup>
     <Content Include="..\..\native\metal\*.metal">
-      <Link>Kernels\%(Filename).%(Extension)</Link>
+      <Link>Kernels\Native\%(Filename).%(Extension)</Link>
     </Content>
   </ItemGroup>
 
