@@ -62,9 +62,6 @@ public sealed unsafe class MetalTransformerModel : IModel
         int deviceId = 0,
         string? ptxDir = null)
     {
-        // Load CPU weights (mmap references only, no heavy allocation)
-        var cpuWeights = TransformerWeights.LoadFromGguf(gguf, config);
-
         // Initialize CUDA
         var context = new MetalContext();
 
@@ -138,7 +135,7 @@ public sealed unsafe class MetalTransformerModel : IModel
         QuantizationType tableFormat = embedding.Fp16Pointer != 0
             ? QuantizationType.F16
             : embedding.QuantizedFormat;
-        EmbeddingLookup.Execute(
+        EmbeddingLookup.ExecuteF16Out(
             _context, tablePtr, tableFormat,
             _state.TokenIds, _state.HiddenState,
             seqLen, Config.HiddenSize, Config.VocabSize);
@@ -226,15 +223,6 @@ public sealed unsafe class MetalTransformerModel : IModel
                 Check("L0: after Down proj", _state.NormOutput, seqLen * hiddenSize); // ← #10
             }
 
-            // Residual + norme attn du layer suivant (sauf au dernier)
-            // if (layer + 1 < Config.NumLayers)
-            // {
-            //     ref readonly var nextLw = ref _weights.Layers[layer + 1];
-            //     FusedAddRmsNorm.Execute(_context, _state.Residual, _state.NormOutput,
-            //                             nextLw.AttnNormWeight, _state.NormOutput,
-            //                             hiddenSize, seqLen, eps);
-            // }
-
             // Residual + norme attn du layer suivant.
             // On the final layer, produce final hidden state = residual + FFN output.
             if (layer + 1 < Config.NumLayers)
@@ -267,13 +255,11 @@ public sealed unsafe class MetalTransformerModel : IModel
         Check("after layer loop: Residual", _state.Residual, seqLen * hiddenSize); // ← #11
 
         // 5. Final RmsNorm — last token only
-        //nint lastHidden = _state.Residual + (seqLen - 1) * hiddenSize * 2;
+        // 5. Final RmsNorm — last token only
         nint lastHidden = _state.HiddenState + (nint)((seqLen - 1) * hiddenSize * sizeof(ushort));
-
         RmsNormF16.Execute(_context, lastHidden, _weights.OutputNormWeight,
-                           _state.NormOutput, hiddenSize, 1, eps);
-
-        Check("after final RmsNorm", _state.NormOutput, hiddenSize); // ← #12
+            _state.NormOutput, hiddenSize, 1, eps);
+        Check("after final RmsNorm", _state.NormOutput, hiddenSize);
 
         // 6. LM head → vocab logits
         Project(_weights.LmHead, _state.NormOutput, _state.LogitsF16, seqLen: 1);
