@@ -20,6 +20,8 @@
 		86B138AA2F91749D00206560 /* bias_add.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86B138A92F91749D00206560 /* bias_add.metal */; };
 		86BD3BE12F93833B00AB9FF5 /* convert.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86BD3BE02F93833B00AB9FF5 /* convert.metal */; };
 		86BD3BE32F938B0C00AB9FF5 /* per_head_rmsnorm_f32.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86BD3BE22F938B0C00AB9FF5 /* per_head_rmsnorm_f32.metal */; };
+		86CB9BDC2FA7905C00CE0BDE /* metal_kv_cache.mm in Headers */ = {isa = PBXBuildFile; fileRef = 86CB9BDB2FA7904A00CE0BDE /* metal_kv_cache.mm */; };
+		86CB9BDE2FA790BB00CE0BDE /* dotllm_core.h in Sources */ = {isa = PBXBuildFile; fileRef = 86CB9BDD2FA790A900CE0BDE /* dotllm_core.h */; };
 		86D09B9F2F9118AD00449404 /* silu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B9E2F9118AD00449404 /* silu.metal */; };
 		86D09BA12F91265C00449404 /* swiglu.metal in Sources */ = {isa = PBXBuildFile; fileRef = 86D09BA02F91265C00449404 /* swiglu.metal */; };
 		AA000001000000000000001 /* bridge.mm in Sources */ = {isa = PBXBuildFile; fileRef = 86D09B992F910B2500449404 /* bridge.mm */; };
@@ -43,6 +45,8 @@
 		86B138A92F91749D00206560 /* bias_add.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = bias_add.metal; sourceTree = "<group>"; };
 		86BD3BE02F93833B00AB9FF5 /* convert.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = convert.metal; sourceTree = "<group>"; };
 		86BD3BE22F938B0C00AB9FF5 /* per_head_rmsnorm_f32.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = per_head_rmsnorm_f32.metal; sourceTree = "<group>"; };
+		86CB9BDB2FA7904A00CE0BDE /* metal_kv_cache.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = metal_kv_cache.mm; sourceTree = "<group>"; };
+		86CB9BDD2FA790A900CE0BDE /* dotllm_core.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dotllm_core.h; sourceTree = "<group>"; };
 		86D09B992F910B2500449404 /* bridge.mm */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.objcpp; path = bridge.mm; sourceTree = "<group>"; };
 		86D09B9A2F910B2500449404 /* dotllm_metal.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = dotllm_metal.h; sourceTree = "<group>"; };
 		86D09B9B2F910BC300449404 /* add.metal */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.metal; path = add.metal; sourceTree = "<group>"; };
@@ -67,6 +71,8 @@
 		86E449DB2F91082F00C99B43 = {
 			isa = PBXGroup;
 			children = (
+				86CB9BDD2FA790A900CE0BDE /* dotllm_core.h */,
+				86CB9BDB2FA7904A00CE0BDE /* metal_kv_cache.mm */,
 				8677BAEE2F9AC92500FC26A9 /* quantized_gemv.metal */,
 				8646E6DE2F96BAEE0098D58D /* attention_f16.metal */,
 				8646E6DC2F96B8820098D58D /* attention_f32.metal */,
@@ -106,6 +112,7 @@
 			isa = PBXHeadersBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				86CB9BDC2FA7905C00CE0BDE /* metal_kv_cache.mm in Headers */,
 				AA000001000000000000002 /* dotllm_metal.h in Headers */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -172,6 +179,7 @@
 				8677BAEF2F9AC92500FC26A9 /* quantized_gemv.metal in Sources */,
 				8603AF642F94E19F0041676F /* dequant.metal in Sources */,
 				8603AF622F94D3520041676F /* embedding_f32out.metal in Sources */,
+				86CB9BDE2FA790BB00CE0BDE /* dotllm_core.h in Sources */,
 				8646E6DA2F9660BC0098D58D /* quantized_gemv_f32in.metal in Sources */,
 				8646E6DF2F96BAEE0098D58D /* attention_f16.metal in Sources */,
 				8646E6DB2F9660BC0098D58D /* quant_kv.metal in Sources */,

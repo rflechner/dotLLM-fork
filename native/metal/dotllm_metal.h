@@ -1,17 +1,11 @@
 #pragma once
 #include <stdint.h>
+#include "dotllm_core.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct dotllm_metal_context dotllm_metal_context;
-
-/// Opaque KV-cache backed by persistent MTLResourceStorageModeShared buffers.
-/// On Apple Silicon, Shared storage is physically accessible by both the CPU
-/// and the GPU — the C# side writes K/V via the contents pointer and the
-/// attention kernel reads directly, with zero copies.
-typedef struct dotllm_metal_kvcache dotllm_metal_kvcache;
 
 /// Creates a KV-cache for the given model geometry.
 /// Returns NULL on failure (OOM or invalid arguments).
