@@ -7,6 +7,54 @@ extern "C" {
 
 typedef struct dotllm_metal_context dotllm_metal_context;
 
+/// Opaque KV-cache backed by persistent MTLResourceStorageModeShared buffers.
+/// On Apple Silicon, Shared storage is physically accessible by both the CPU
+/// and the GPU — the C# side writes K/V via the contents pointer and the
+/// attention kernel reads directly, with zero copies.
+typedef struct dotllm_metal_kvcache dotllm_metal_kvcache;
+
+/// Creates a KV-cache for the given model geometry.
+/// Returns NULL on failure (OOM or invalid arguments).
+dotllm_metal_kvcache* dotllm_metal_kvcache_create(
+    dotllm_metal_context* ctx,
+    int32_t num_layers,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t max_seq_len);
+
+/// Destroys the KV-cache and releases all MTLBuffer resources.
+void dotllm_metal_kvcache_destroy(dotllm_metal_kvcache* cache);
+
+/// Returns the CPU-writable contents pointer for layer's K buffer (FP16 rows).
+/// Layout: [max_seq_len, num_kv_heads * head_dim], row-major, FP16.
+void* dotllm_metal_kvcache_key_ptr(dotllm_metal_kvcache* cache, int32_t layer);
+
+/// Returns the CPU-writable contents pointer for layer's V buffer (FP16 rows).
+void* dotllm_metal_kvcache_value_ptr(dotllm_metal_kvcache* cache, int32_t layer);
+
+/// Returns the current number of valid cached positions.
+int32_t dotllm_metal_kvcache_current_length(dotllm_metal_kvcache* cache);
+
+/// Sets the current valid length (used for rollback and prefix-cache reuse).
+void dotllm_metal_kvcache_set_current_length(dotllm_metal_kvcache* cache, int32_t length);
+
+/// FP16 attention using persistent K/V MTLBuffers from the given cache layer.
+/// K/V data must have been written to the cache (via the key/value ptr) before
+/// calling this function. seq_q is usually 1 during decode.
+/// position_offset is the position of the first query token (= cache length before update).
+int dotllm_metal_attention_f16_kvcache(
+    dotllm_metal_context* ctx,
+    dotllm_metal_kvcache* cache,
+    const uint16_t* q,
+    uint16_t*       output,
+    int32_t         layer,
+    int32_t         seq_q,
+    int32_t         num_heads,
+    int32_t         num_kv_heads,
+    int32_t         head_dim,
+    int32_t         position_offset,
+    int32_t         sliding_window);
+
 /// Creates a Metal context (device + command queue + pipeline cache).
 /// Returns NULL on failure.
 dotllm_metal_context* dotllm_metal_create_context(void);
