@@ -1285,6 +1285,204 @@ extern "C" int dotllm_metal_embedding_q8_0_f16out(
         embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
 }
 
+// ── KV-cache (persistent MTLBuffers, zero-copy on Apple Silicon) ─────────────
+//
+// Each layer gets two MTLResourceStorageModeShared buffers (K and V) allocated
+// once at creation. On Apple Silicon, Shared storage means the .contents pointer
+// is the same physical memory the GPU reads — the C# side writes via NativeMemory.Copy
+// and the kernel consumes the buffer directly, with zero copies.
+//
+// key_ptrs / value_ptrs are cached .contents addresses so the hot path never
+// sends ObjC messages for pointer lookup.
+
+struct dotllm_metal_kvcache {
+    NSArray<id<MTLBuffer>>* key_buffers;     // [num_layers] — ARC strong
+    NSArray<id<MTLBuffer>>* value_buffers;   // [num_layers] — ARC strong
+    void**   key_ptrs;    // raw .contents addresses (no ObjC msg on hot path)
+    void**   value_ptrs;
+    int32_t  num_layers;
+    int32_t  kv_stride;   // num_kv_heads * head_dim
+    int32_t  max_seq_len;
+    int32_t  current_length;
+};
+
+extern "C" dotllm_metal_kvcache* dotllm_metal_kvcache_create(
+    dotllm_metal_context* ctx,
+    int32_t num_layers,
+    int32_t num_kv_heads,
+    int32_t head_dim,
+    int32_t max_seq_len)
+{
+    if (!ctx || num_layers <= 0 || num_kv_heads <= 0 || head_dim <= 0 || max_seq_len <= 0)
+        return nullptr;
+
+    NSUInteger bufBytes = (NSUInteger)((size_t)max_seq_len * num_kv_heads * head_dim * sizeof(uint16_t));
+
+    NSMutableArray<id<MTLBuffer>>* kArr = [NSMutableArray arrayWithCapacity:num_layers];
+    NSMutableArray<id<MTLBuffer>>* vArr = [NSMutableArray arrayWithCapacity:num_layers];
+
+    void** kPtrs = (void**)malloc((size_t)num_layers * sizeof(void*));
+    void** vPtrs = (void**)malloc((size_t)num_layers * sizeof(void*));
+    if (!kPtrs || !vPtrs) { free(kPtrs); free(vPtrs); return nullptr; }
+
+    for (int i = 0; i < num_layers; i++) {
+        id<MTLBuffer> kb = [ctx->device newBufferWithLength:bufBytes options:MTLResourceStorageModeShared];
+        id<MTLBuffer> vb = [ctx->device newBufferWithLength:bufBytes options:MTLResourceStorageModeShared];
+        if (!kb || !vb) { free(kPtrs); free(vPtrs); return nullptr; }
+        [kArr addObject:kb];
+        [vArr addObject:vb];
+        kPtrs[i] = kb.contents;
+        vPtrs[i] = vb.contents;
+    }
+
+    auto* cache          = new dotllm_metal_kvcache();
+    cache->key_buffers   = [kArr copy];
+    cache->value_buffers = [vArr copy];
+    cache->key_ptrs      = kPtrs;
+    cache->value_ptrs    = vPtrs;
+    cache->num_layers    = num_layers;
+    cache->kv_stride     = num_kv_heads * head_dim;
+    cache->max_seq_len   = max_seq_len;
+    cache->current_length = 0;
+    return cache;
+}
+
+extern "C" void dotllm_metal_kvcache_destroy(dotllm_metal_kvcache* cache)
+{
+    if (!cache) return;
+    free(cache->key_ptrs);
+    free(cache->value_ptrs);
+    // ARC releases key_buffers / value_buffers (and the MTLBuffers they hold)
+    // when the struct is deleted.
+    delete cache;
+}
+
+extern "C" void* dotllm_metal_kvcache_key_ptr(dotllm_metal_kvcache* cache, int32_t layer)
+{
+    if (!cache || layer < 0 || layer >= cache->num_layers) return nullptr;
+    return cache->key_ptrs[layer];
+}
+
+extern "C" void* dotllm_metal_kvcache_value_ptr(dotllm_metal_kvcache* cache, int32_t layer)
+{
+    if (!cache || layer < 0 || layer >= cache->num_layers) return nullptr;
+    return cache->value_ptrs[layer];
+}
+
+extern "C" int32_t dotllm_metal_kvcache_current_length(dotllm_metal_kvcache* cache)
+{
+    return cache ? cache->current_length : 0;
+}
+
+extern "C" void dotllm_metal_kvcache_set_current_length(dotllm_metal_kvcache* cache, int32_t length)
+{
+    if (cache) cache->current_length = length;
+}
+
+// Attention using persistent K/V MTLBuffers — only Q and output need temp alloc.
+static int run_attention_f16_with_kvcache(
+    dotllm_metal_context* ctx,
+    dotllm_metal_kvcache* cache,
+    const uint16_t* q,
+    uint16_t*       output,
+    int32_t         layer,
+    int32_t         seq_q,
+    int32_t         num_heads,
+    int32_t         num_kv_heads,
+    int32_t         head_dim,
+    int32_t         position_offset,
+    int32_t         sliding_window)
+{
+    @autoreleasepool {
+        if (!ctx || !cache || !q || !output) return -10;
+        if (layer < 0 || layer >= cache->num_layers) return -10;
+        if (seq_q <= 0 || num_heads <= 0 || num_kv_heads <= 0 || head_dim <= 0) return -10;
+        if (num_heads % num_kv_heads != 0) return -10;
+
+        int32_t seq_kv = cache->current_length;
+        if (seq_kv <= 0) return -10;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "attention_f16.metal", "attention_f16");
+        if (!pipeline) return -3;
+
+        NSUInteger qBytes   = (NSUInteger)(seq_q * num_heads * head_dim) * sizeof(uint16_t);
+        NSUInteger outBytes = qBytes;
+
+        // Q and output: small temp buffers (decode ≈ 8 KB)
+        id<MTLBuffer> bufQ   = [ctx->device newBufferWithBytes:q    length:qBytes   options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outBytes            options:MTLResourceStorageModeShared];
+
+        // K/V: persistent cache buffers — zero copies on Apple Silicon
+        id<MTLBuffer> bufK = [cache->key_buffers   objectAtIndex:(NSUInteger)layer];
+        id<MTLBuffer> bufV = [cache->value_buffers objectAtIndex:(NSUInteger)layer];
+
+        if (!bufQ || !bufOut || !bufK || !bufV) return -7;
+
+        id<MTLBuffer> bufSeqQ    = [ctx->device newBufferWithBytes:&seq_q           length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSeqKV   = [ctx->device newBufferWithBytes:&seq_kv          length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNH      = [ctx->device newBufferWithBytes:&num_heads        length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufNKV     = [ctx->device newBufferWithBytes:&num_kv_heads     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufHD      = [ctx->device newBufferWithBytes:&head_dim         length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufPosOff  = [ctx->device newBufferWithBytes:&position_offset  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+        id<MTLBuffer> bufSlide   = [ctx->device newBufferWithBytes:&sliding_window   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
+
+        if (!bufSeqQ || !bufSeqKV || !bufNH || !bufNKV || !bufHD || !bufPosOff || !bufSlide) return -7;
+
+        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+        if (!cmd) return -8;
+        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufQ      offset:0 atIndex:0];
+        [enc setBuffer:bufK      offset:0 atIndex:1];
+        [enc setBuffer:bufV      offset:0 atIndex:2];
+        [enc setBuffer:bufOut    offset:0 atIndex:3];
+        [enc setBuffer:bufSeqQ   offset:0 atIndex:4];
+        [enc setBuffer:bufSeqKV  offset:0 atIndex:5];
+        [enc setBuffer:bufNH     offset:0 atIndex:6];
+        [enc setBuffer:bufNKV    offset:0 atIndex:7];
+        [enc setBuffer:bufHD     offset:0 atIndex:8];
+        [enc setBuffer:bufPosOff offset:0 atIndex:9];
+        [enc setBuffer:bufSlide  offset:0 atIndex:10];
+
+        const int TILE_KV = 256;
+        NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
+        [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
+
+        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
+        [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
+            threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
+        [enc endEncoding];
+        [cmd commit];
+        [cmd waitUntilCompleted];
+
+        if (cmd.error != nil) return -11;
+
+        memcpy(output, bufOut.contents, outBytes);
+        return 0;
+    }
+}
+
+extern "C" int dotllm_metal_attention_f16_kvcache(
+    dotllm_metal_context* ctx,
+    dotllm_metal_kvcache* cache,
+    const uint16_t* q,
+    uint16_t*       output,
+    int32_t         layer,
+    int32_t         seq_q,
+    int32_t         num_heads,
+    int32_t         num_kv_heads,
+    int32_t         head_dim,
+    int32_t         position_offset,
+    int32_t         sliding_window)
+{
+    return run_attention_f16_with_kvcache(ctx, cache, q, output, layer,
+        seq_q, num_heads, num_kv_heads, head_dim, position_offset, sliding_window);
+}
+
 // ── Attention ────────────────────────────────────────────────────────────────
 //
 // Shared dispatch helper: both f16 and f32 variants use the same layout,

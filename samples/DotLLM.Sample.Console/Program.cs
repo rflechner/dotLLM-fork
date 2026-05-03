@@ -1,4 +1,3 @@
-using System.Diagnostics.CodeAnalysis;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
@@ -25,7 +24,10 @@ string prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "The capital 
 
 Console.WriteLine($"Loading model: {modelPath}");
 
-(IModel model, GgufFile gguf, ModelConfig config) = LoadModel();
+var runCtx = LoadModel();
+IModel model = runCtx.Model;
+GgufFile gguf = runCtx.Gguf;
+ModelConfig config = runCtx.Config;
 
 var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
@@ -33,26 +35,25 @@ Console.WriteLine($"Model: {config.Architecture}, {config.NumLayers} layers, {co
 Console.WriteLine($"Prompt: \"{prompt}\"");
 Console.WriteLine();
 
-var generator = new TextGenerator(model, tokenizer);
+var generator = new TextGenerator(model, tokenizer, kvCacheFactory: runCtx.KvCacheFactory);
 
 // --- Composable sampling pipeline ---
 var options = new InferenceOptions
 {
     SamplerSteps =
     [
-        // new TemperatureSampler(0.8f),
-        // new TopKSampler(40),
-        // new TopPSampler(0.95f),
-        // new MinPSampler(0.05f)
+        new TemperatureSampler(0.8f),
+        new TopKSampler(40),
+        new TopPSampler(0.95f),
+        new MinPSampler(0.05f)
     ],
     StopConditions =
     [
         new EosStopCondition(tokenizer.EosTokenId),
-        new MaxTokensStopCondition(1)
+        new MaxTokensStopCondition(128)
     ],
     Seed = 42,
-    MaxTokens = 1,
-    Temperature = 0.0f,
+    MaxTokens = 128,
 };
 
 // --- Streaming generation via IAsyncEnumerable ---

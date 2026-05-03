@@ -47,6 +47,8 @@ public sealed unsafe class MetalTransformerModel : IModel
     /// <inheritdoc/>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
+    internal MetalContext Context => _context;
+
     /// <summary>
     /// Loads a transformer model onto the GPU from an opened GGUF file.
     /// </summary>
@@ -184,10 +186,38 @@ public sealed unsafe class MetalTransformerModel : IModel
                 Check("L0: K after RoPE", _state.K, seqLen * lw.K.OutputDim);
             }
 
-            // KV cache + Attention (TODO : kvCache plus tard, pour la v1 attention sur K/V courants seulement)
-            AttentionF16.Execute(_context, _state.Q, _state.K, _state.V, _state.AttnOutput,
-                                 seqLen, seqLen, numHeads, numKvHeads, headDim,
-                                 positionOffset: 0, slidingWindow: 0);
+            // Write current K/V into the persistent cache (CPU memcpy into shared MTLBuffer)
+            // then choose the attention path based on whether we have a Metal cache.
+            if (kvCache is MetalKvCache metalCache)
+            {
+                metalCache.WriteKV(layer, _state.K, _state.V, positions);
+
+                if (seqLen > 1)
+                {
+                    // Prefill: full causal self-attention over the current tokens.
+                    // We still use _state.K/_state.V (already in shared memory) to avoid
+                    // a round-trip through the MTLBuffer for the prefill pass.
+                    AttentionF16.Execute(_context, _state.Q, _state.K, _state.V, _state.AttnOutput,
+                        seqLen, seqLen, numHeads, numKvHeads, headDim,
+                        positionOffset: 0, slidingWindow: 0);
+                }
+                else
+                {
+                    // Decode: Q attends over the full accumulated cache.
+                    // K/V are read directly from the persistent MTLBuffers — zero copies.
+                    AttentionF16.ExecuteWithKvCache(_context, metalCache, layer,
+                        _state.Q, _state.AttnOutput,
+                        seqLen, numHeads, numKvHeads, headDim,
+                        positionOffset: positions[0]);
+                }
+            }
+            else
+            {
+                // No kvcache — full self-attention over the current tokens only.
+                AttentionF16.Execute(_context, _state.Q, _state.K, _state.V, _state.AttnOutput,
+                    seqLen, seqLen, numHeads, numKvHeads, headDim,
+                    positionOffset: 0, slidingWindow: 0);
+            }
             if (layer == 0) {
                 Check("L0: AttnOutput", _state.AttnOutput, seqLen * lw.Q.OutputDim); // ← #6
             }

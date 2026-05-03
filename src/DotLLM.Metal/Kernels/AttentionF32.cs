@@ -119,6 +119,36 @@ public static class AttentionF16
             throw new InvalidOperationException($"Metal attention_f16 failed with code {code}.");
         }
     }
+
+    /// <summary>
+    /// Attention using persistent K/V MTLBuffers from the given cache layer.
+    /// K/V must already have been written to the cache via <see cref="MetalKvCache.WriteKV"/>
+    /// before calling this. seqKv is taken from <paramref name="cache"/>.CurrentLength.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static unsafe void ExecuteWithKvCache(
+        MetalContext ctx,
+        MetalKvCache cache,
+        int          layer,
+        nint         q,
+        nint         output,
+        int          seqQ,
+        int          numHeads,
+        int          numKvHeads,
+        int          headDim,
+        int          positionOffset,
+        int          slidingWindow = 0)
+    {
+        int code = MetalNative.AttentionF16WithKvCache(
+            ctx.Handle, cache.Handle,
+            (ushort*)q, (ushort*)output,
+            layer, seqQ, numHeads, numKvHeads, headDim,
+            positionOffset, slidingWindow);
+
+        if (code != 0)
+            throw new InvalidOperationException(
+                $"Metal attention_f16_kvcache failed with code {code}.");
+    }
 }
 
 /// <summary>

@@ -24,6 +24,8 @@ public class MetalModelLoader
         var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
         var model = MetalTransformerModel.LoadFromGguf(gguf, config, strategy, ptxDir: ptxDir);
 
-        return new ModelRunContext(model, gguf, config);
+        var ctx = model.Context;
+        return new ModelRunContext(model, gguf, config,
+            KvCacheFactory: (cfg, maxSeqLen) => new MetalKvCache(ctx, cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, maxSeqLen));
     }
 }
