@@ -47,7 +47,10 @@ public sealed unsafe class MetalTransformerModel : IModel
     /// <inheritdoc/>
     public long ComputeMemoryBytes => _state.AllocatedBytes;
 
-    internal MetalContext Context => _context;
+    /// <summary>
+    /// Provides access to the underlying <see cref="MetalContext"/> associated with this model.
+    /// </summary>
+    public MetalContext Context => _context;
 
     /// <summary>
     /// Loads a transformer model onto the GPU from an opened GGUF file.
