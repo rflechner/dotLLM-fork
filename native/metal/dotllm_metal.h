@@ -310,6 +310,17 @@ int dotllm_metal_embedding_q8_0_f16out(
     int32_t         hidden_size,
     int32_t         seq_len);
 
+/// Embedding lookup — Q6_K quantized table → FP16 output (dequantize on the fly).
+/// embed_table layout: vocab_size × (hidden_size/256) superblocks × 210 bytes each.
+int dotllm_metal_embedding_q6_k_f16out(
+    dotllm_metal_context* ctx,
+    const uint8_t*  embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len);
+
 // ── Attention ────────────────────────────────────────────────────────────────
 
 /// Tiled scaled dot-product attention: FP16 Q/K/V/output, FP32 accumulation.

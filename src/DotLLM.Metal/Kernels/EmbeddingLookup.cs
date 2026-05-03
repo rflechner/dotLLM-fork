@@ -1,6 +1,9 @@
+using System.Buffers;
+using System.Numerics.Tensors;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Cpu.Kernels;
 using DotLLM.Metal.Interop;
 
 namespace DotLLM.Metal.Kernels;
@@ -230,7 +233,7 @@ public static class EmbeddingLookup
         int              hiddenSize,
         int              vocabSize)
     {
-        int code = embedDtype switch
+        int? code = embedDtype switch
         {
             QuantizationType.F32  => MetalNative.EmbeddingF32F16Out(
                 ctx.Handle, (float*)embedTable,  (int*)tokenIds, (ushort*)output,
@@ -244,13 +247,51 @@ public static class EmbeddingLookup
                 ctx.Handle, (byte*)embedTable,   (int*)tokenIds, (ushort*)output,
                 vocabSize, hiddenSize, seqLen),
 
-            _ => throw new NotSupportedException(
-                $"Embedding type {embedDtype} not supported on Metal yet. " +
-                $"Add a dedicated kernel or load the model with DequantToFp16Strategy."),
+            QuantizationType.Q6_K => MetalNative.EmbeddingQ6_KF16Out(
+                ctx.Handle, (byte*)embedTable,   (int*)tokenIds, (ushort*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            _ => null, // CPU fallback for formats without a dedicated GPU kernel
         };
+
+        if (code is null)
+        {
+            CpuFallbackF16Out(embedTable, embedDtype, tokenIds, output, seqLen, hiddenSize);
+            return;
+        }
 
         if (code != 0)
             throw new InvalidOperationException(
                 $"Metal embedding_{embedDtype}_f16out failed with code {code}.");
+    }
+
+    // Dequantizes seqLen rows on the CPU into the shared-memory FP16 output buffer.
+    // Used for quantization formats that have no dedicated embedding GPU kernel yet
+    // (e.g. Q4_K, Q5_K, Q6_K). On Apple Silicon the output pointer is shared memory
+    // so the GPU will read the written FP16 values directly.
+    private static unsafe void CpuFallbackF16Out(
+        nint embedTable, QuantizationType embedDtype,
+        nint tokenIds, nint output,
+        int seqLen, int hiddenSize)
+    {
+        long rowBytes = Dequantize.RowByteSize(hiddenSize, embedDtype);
+        float[] scratch = ArrayPool<float>.Shared.Rent(hiddenSize);
+        try
+        {
+            var scratch32 = scratch.AsSpan(0, hiddenSize);
+            int* ids = (int*)tokenIds;
+            for (int t = 0; t < seqLen; t++)
+            {
+                nint rowSrc = embedTable + (nint)(ids[t] * rowBytes);
+                Dequantize.ToFloat32(rowSrc, hiddenSize, embedDtype, scratch32);
+
+                var dst16 = new Span<Half>((Half*)output + (nint)(t * hiddenSize), hiddenSize);
+                TensorPrimitives.ConvertToHalf(scratch32, dst16);
+            }
+        }
+        finally
+        {
+            ArrayPool<float>.Shared.Return(scratch);
+        }
     }
 }

@@ -1280,6 +1280,23 @@ extern "C" int dotllm_metal_embedding_q8_0_f16out(
         embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
 }
 
+extern "C" int dotllm_metal_embedding_q6_k_f16out(
+    dotllm_metal_context* ctx,
+    const uint8_t*  embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len)
+{
+    const int32_t Q6_K_SUPER_BLOCK_SIZE = 256;
+    const int32_t Q6_K_BLOCK_BYTES      = 210;
+    int32_t blocks_per_row = hidden_size / Q6_K_SUPER_BLOCK_SIZE;
+    NSUInteger tableBytes = (NSUInteger)(vocab_size * blocks_per_row) * Q6_K_BLOCK_BYTES;
+    return run_embedding_kernel(ctx, "embedding_lookup_q6_k_f16out",
+        embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
+}
+
 // Attention using persistent K/V MTLBuffers — only Q and output need temp alloc.
 static int run_attention_f16_with_kvcache(
     dotllm_metal_context* ctx,
