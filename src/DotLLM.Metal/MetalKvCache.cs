@@ -8,7 +8,7 @@ namespace DotLLM.Metal;
 /// <summary>
 /// KV-cache backed by persistent <c>MTLResourceStorageModeShared</c> MTLBuffers.
 /// On Apple Silicon, Shared storage is the same physical memory for CPU and GPU —
-/// the C# forward pass writes K/V via <see cref="WriteKV"/> (a plain CPU memcpy)
+/// the C# forward pass writes K/V
 /// and the attention kernel reads the same bytes without any copy or synchronisation.
 /// </summary>
 public sealed unsafe class MetalKvCache : IKvCache
@@ -60,23 +60,35 @@ public sealed unsafe class MetalKvCache : IKvCache
     /// <param name="kSrc">Pointer to K projection, layout <c>[seqLen, kvStride]</c> FP16.</param>
     /// <param name="vSrc">Pointer to V projection, layout <c>[seqLen, kvStride]</c> FP16.</param>
     /// <param name="positions">Position indices for the current tokens (sorted ascending).</param>
-    internal void WriteKV(int layer, nint kSrc, nint vSrc, ReadOnlySpan<int> positions)
+    private void WriteKV(
+        int layer,
+        nint kSrc,
+        nint vSrc,
+        ReadOnlySpan<int> positions)
     {
-        void* kDst = MetalNative.KvCacheKeyPtr(_handle, layer);
-        void* vDst = MetalNative.KvCacheValuePtr(_handle, layer);
-        nuint rowBytes = (nuint)(_kvStride * sizeof(ushort));
+        if (positions.IsEmpty)
+            return;
+
+        nint kBasePtr = (nint)MetalNative.KvCacheKeyPtr(_handle, layer);
+        nint vBasePtr = (nint)MetalNative.KvCacheValuePtr(_handle, layer);
+
+        int elementsPerToken = _kvStride;
+        int sourceElementCount = positions.Length * elementsPerToken;
+
+        var kSource = new ReadOnlySpan<ushort>((void*)kSrc, sourceElementCount);
+        var vSource = new ReadOnlySpan<ushort>((void*)vSrc, sourceElementCount);
 
         for (int i = 0; i < positions.Length; i++)
         {
-            int pos = positions[i];
-            NativeMemory.Copy(
-                source:      (void*)(kSrc + (nint)(i * _kvStride * sizeof(ushort))),
-                destination: (byte*)kDst  + (long)pos * (long)rowBytes,
-                byteCount:   rowBytes);
-            NativeMemory.Copy(
-                source:      (void*)(vSrc + (nint)(i * _kvStride * sizeof(ushort))),
-                destination: (byte*)vDst  + (long)pos * (long)rowBytes,
-                byteCount:   rowBytes);
+            int position = positions[i];
+
+            WriteKV(
+                kBasePtr,
+                vBasePtr,
+                position,
+                elementsPerToken,
+                kSource.Slice(i * elementsPerToken, elementsPerToken),
+                vSource.Slice(i * elementsPerToken, elementsPerToken));
         }
 
         int newLen = positions[^1] + 1;
@@ -87,11 +99,31 @@ public sealed unsafe class MetalKvCache : IKvCache
         }
     }
 
-    // ── IKvCache ─────────────────────────────────────────────────────────────────
+    private static void WriteKV(
+        nint kBasePtr,
+        nint vBasePtr,
+        int currentTokenIndex,
+        int elementsPerToken,
+        ReadOnlySpan<ushort> kData,
+        ReadOnlySpan<ushort> vData)
+    {
+        if (kData.Length != elementsPerToken || vData.Length != elementsPerToken)
+            throw new ArgumentException("Invalid KV size");
+
+        var kSpan = new Span<ushort>((void*)kBasePtr, elementsPerToken * (currentTokenIndex + 1));
+        var vSpan = new Span<ushort>((void*)vBasePtr, elementsPerToken * (currentTokenIndex + 1));
+
+        int offset = currentTokenIndex * elementsPerToken;
+
+        kData.CopyTo(kSpan.Slice(offset, elementsPerToken));
+        vData.CopyTo(vSpan.Slice(offset, elementsPerToken));
+    }
 
     /// <inheritdoc/>
     public void Update(TensorRef keys, TensorRef values, ReadOnlySpan<int> positions, int layerIndex)
-        => WriteKV(layerIndex, keys.DataPointer, values.DataPointer, positions);
+    {
+        WriteKV(layerIndex, keys.DataPointer, values.DataPointer, positions);
+    }
 
     /// <inheritdoc/>
     public void Update(ITensor keys, ITensor values, ReadOnlySpan<int> positions, int layerIndex)

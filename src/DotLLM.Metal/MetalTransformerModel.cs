@@ -190,7 +190,11 @@ public sealed unsafe class MetalTransformerModel : IModel
             // then choose the attention path based on whether we have a Metal cache.
             if (kvCache is MetalKvCache metalCache)
             {
-                metalCache.WriteKV(layer, _state.K, _state.V, positions);
+                int kvStride = Config.NumKvHeads * Config.HeadDim;
+                var kRef = new TensorRef(positions.Length, kvStride, DType.Float16, -1, _state.K);
+                var vRef = new TensorRef(positions.Length, kvStride, DType.Float16, -1, _state.V);
+
+                metalCache.Update(kRef, vRef, positions, layer);
 
                 if (seqLen > 1)
                 {
