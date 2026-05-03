@@ -4,8 +4,6 @@ using Xunit;
 
 namespace DotLLM.Tests.Unit.Metal;
 
-// ── AddF32 ────────────────────────────────────────────────────────────────────
-
 public sealed class AddF32Tests
 {
     [Fact]
