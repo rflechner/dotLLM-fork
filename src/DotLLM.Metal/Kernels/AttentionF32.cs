@@ -122,7 +122,7 @@ public static class AttentionF16
 
     /// <summary>
     /// Attention using persistent K/V MTLBuffers from the given cache layer.
-    /// K/V must already have been written to the cache via <see cref="MetalKvCache.WriteKV"/>
+    /// K/V must already have been written to the cache
     /// before calling this. seqKv is taken from <paramref name="cache"/>.CurrentLength.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
