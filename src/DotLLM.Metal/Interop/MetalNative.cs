@@ -19,4 +19,18 @@ internal static partial class MetalNative
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_destroy_context")]
     [SuppressGCTransition]
     internal static partial void DestroyContext(nint ctx);
+
+    /// <summary>
+    /// Allocates shared (CPU+GPU visible) memory and returns the .contents pointer.
+    /// The backing MTLBuffer is retained by the context for zero-copy kernel access.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_alloc_shared")]
+    internal static partial nint AllocShared(nint ctx, nuint bytes);
+
+    /// <summary>
+    /// Releases a buffer previously returned by <see cref="AllocShared"/>.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_free_shared")]
+    [SuppressGCTransition]
+    internal static partial void FreeShared(nint ctx, nint ptr);
 }
