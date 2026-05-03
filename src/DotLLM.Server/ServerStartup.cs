@@ -1,9 +1,13 @@
+using System.Runtime.InteropServices;
 using DotLLM.Core.Attention;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
+using DotLLM.Cuda;
 using DotLLM.Engine;
 using DotLLM.Engine.KvCache;
 using DotLLM.Engine.PromptCache;
+using DotLLM.Metal;
+using DotLLM.Metal.Weights.Strategies;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
 using DotLLM.Tokenizers;
@@ -84,9 +88,21 @@ public static class ServerStartup
         }
         else if (gpuLayers >= config.NumLayers)
         {
-            int gpuId = ParseGpuId(options.Device);
-            Console.WriteLine($"[dotllm] GPU {gpuId} inference");
-            model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            if (CudaDevice.IsAvailable())
+            {
+                int gpuId = ParseGpuId(options.Device);
+                Console.WriteLine($"[dotllm] GPU {gpuId} inference");
+                model = DotLLM.Cuda.CudaTransformerModel.LoadFromGguf(gguf, config, gpuId);
+            }
+            else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+            {
+                Console.WriteLine($"[dotllm] GPU METAL inference");
+                model = MetalTransformerModel.LoadFromGguf(gguf, config, new DequantToFp16Strategy());
+            }
+            else
+            {
+                throw new NotSupportedException("GPU inference is not supported on this platform.");
+            }
         }
         else
         {
@@ -123,6 +139,12 @@ public static class ServerStartup
             kvFactory = kvConfig.IsQuantized
                 ? (cfg, size) => cudaModel.CreateKvCache(size, kvConfig)
                 : (cfg, size) => cudaModel.CreateKvCache(size);
+        }
+        else if (model is MetalTransformerModel metalModel)
+        {
+            if (options.UsePaged)
+                Console.WriteLine("[dotllm] Paged KV-cache not supported with Metal, using GPU cache.");
+            kvFactory = (cfg, size) => new MetalKvCache(metalModel.Context, cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, cfg.MaxSequenceLength);
         }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
         {
