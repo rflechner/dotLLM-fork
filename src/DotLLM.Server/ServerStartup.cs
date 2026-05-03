@@ -97,7 +97,7 @@ public static class ServerStartup
             else if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
             {
                 Console.WriteLine($"[dotllm] GPU METAL inference");
-                model = MetalTransformerModel.LoadFromGguf(gguf, config, new DequantToFp16Strategy());
+                model = MetalTransformerModel.LoadFromGguf(gguf, config, new MmapOnlyStrategy());
             }
             else
             {

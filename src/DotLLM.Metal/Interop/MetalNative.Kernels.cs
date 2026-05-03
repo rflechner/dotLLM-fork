@@ -283,6 +283,17 @@ internal static partial class MetalNative
         int     hiddenSize,
         int     seqLen);
 
+    /// <summary>Embedding lookup: Q6_K quantized table → FP16 output (dequantize on the fly).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_q6_k_f16out")]
+    internal static unsafe partial int EmbeddingQ6_KF16Out(
+        nint    ctx,
+        byte*   embedTable,
+        int*    tokenIds,
+        ushort* output,
+        int     vocabSize,
+        int     hiddenSize,
+        int     seqLen);
+
     /// <summary>FP16 attention using persistent K/V MTLBuffers from the given cache layer.</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_attention_f16_kvcache")]
     internal static unsafe partial int AttentionF16WithKvCache(
