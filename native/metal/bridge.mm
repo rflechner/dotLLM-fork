@@ -1135,15 +1135,17 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
 }
 
 // ── Embedding lookup helper ───────────────────────────────────────────────────
-// All three variants share the same buffer layout and dispatch pattern.
+// All variants share the same buffer layout and dispatch pattern.
 // embed_table_bytes: total byte size of the embed table (varies by dtype).
+// out_elem_bytes: size of one output element (4 for FP32, 2 for FP16).
 static int run_embedding_kernel(
     dotllm_metal_context* ctx,
     const char*  functionName,
     const void*  embed_table,
     NSUInteger   embed_table_bytes,
     const int32_t* token_ids,
-    float*       output,
+    void*        output,
+    NSUInteger   out_elem_bytes,
     int32_t      hidden_size,
     int32_t      seq_len)
 {
@@ -1156,7 +1158,7 @@ static int run_embedding_kernel(
 
         uint32_t tgSize     = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
-        NSUInteger outBytes = (NSUInteger)(seq_len * hidden_size) * sizeof(float);
+        NSUInteger outBytes = (NSUInteger)(seq_len * hidden_size) * out_elem_bytes;
 
         id<MTLBuffer> bufTable  = [ctx->device newBufferWithBytes:embed_table length:embed_table_bytes options:MTLResourceStorageModeShared];
         id<MTLBuffer> bufIds    = [ctx->device newBufferWithBytes:token_ids   length:posBytes          options:MTLResourceStorageModeShared];
@@ -1204,7 +1206,7 @@ extern "C" int dotllm_metal_embedding_f32_f32out(
 {
     NSUInteger tableBytes = (NSUInteger)(vocab_size * hidden_size) * sizeof(float);
     return run_embedding_kernel(ctx, "embedding_lookup_f32_f32out",
-        embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
+        embed_table, tableBytes, token_ids, output, sizeof(float), hidden_size, seq_len);
 }
 
 extern "C" int dotllm_metal_embedding_f16_f32out(
@@ -1218,7 +1220,7 @@ extern "C" int dotllm_metal_embedding_f16_f32out(
 {
     NSUInteger tableBytes = (NSUInteger)(vocab_size * hidden_size) * sizeof(uint16_t);
     return run_embedding_kernel(ctx, "embedding_lookup_f16_f32out",
-        embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
+        embed_table, tableBytes, token_ids, output, sizeof(float), hidden_size, seq_len);
 }
 
 extern "C" int dotllm_metal_embedding_q8_0_f32out(
@@ -1235,7 +1237,52 @@ extern "C" int dotllm_metal_embedding_q8_0_f32out(
     int32_t blocks_per_row = hidden_size / Q8_0_BLOCK_SIZE;
     NSUInteger tableBytes = (NSUInteger)(vocab_size * blocks_per_row) * Q8_0_BLOCK_BYTES;
     return run_embedding_kernel(ctx, "embedding_lookup_q8_0_f32out",
-        embed_table, tableBytes, token_ids, output, hidden_size, seq_len);
+        embed_table, tableBytes, token_ids, output, sizeof(float), hidden_size, seq_len);
+}
+
+extern "C" int dotllm_metal_embedding_f32_f16out(
+    dotllm_metal_context* ctx,
+    const float*    embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len)
+{
+    NSUInteger tableBytes = (NSUInteger)(vocab_size * hidden_size) * sizeof(float);
+    return run_embedding_kernel(ctx, "embedding_lookup_f32_f16out",
+        embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
+}
+
+extern "C" int dotllm_metal_embedding_f16_f16out(
+    dotllm_metal_context* ctx,
+    const uint16_t* embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len)
+{
+    NSUInteger tableBytes = (NSUInteger)(vocab_size * hidden_size) * sizeof(uint16_t);
+    return run_embedding_kernel(ctx, "embedding_lookup_f16_f16out",
+        embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
+}
+
+extern "C" int dotllm_metal_embedding_q8_0_f16out(
+    dotllm_metal_context* ctx,
+    const uint8_t*  embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len)
+{
+    const int32_t Q8_0_BLOCK_SIZE  = 32;
+    const int32_t Q8_0_BLOCK_BYTES = 34;
+    int32_t blocks_per_row = hidden_size / Q8_0_BLOCK_SIZE;
+    NSUInteger tableBytes = (NSUInteger)(vocab_size * blocks_per_row) * Q8_0_BLOCK_BYTES;
+    return run_embedding_kernel(ctx, "embedding_lookup_q8_0_f16out",
+        embed_table, tableBytes, token_ids, output, sizeof(uint16_t), hidden_size, seq_len);
 }
 
 // ── Attention ────────────────────────────────────────────────────────────────

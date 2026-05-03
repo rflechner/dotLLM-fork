@@ -270,6 +270,39 @@ internal static partial class MetalNative
         int    hiddenSize,
         int    seqLen);
 
+    /// <summary>Embedding lookup: FP32 table → FP16 output (cast on the fly).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_f32_f16out")]
+    internal static unsafe partial int EmbeddingF32F16Out(
+        nint    ctx,
+        float*  embedTable,
+        int*    tokenIds,
+        ushort* output,
+        int     vocabSize,
+        int     hiddenSize,
+        int     seqLen);
+
+    /// <summary>Embedding lookup: FP16 table → FP16 output (straight copy of half rows).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_f16_f16out")]
+    internal static unsafe partial int EmbeddingF16F16Out(
+        nint    ctx,
+        ushort* embedTable,
+        int*    tokenIds,
+        ushort* output,
+        int     vocabSize,
+        int     hiddenSize,
+        int     seqLen);
+
+    /// <summary>Embedding lookup: Q8_0 quantized table → FP16 output (dequantize on the fly).</summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_embedding_q8_0_f16out")]
+    internal static unsafe partial int EmbeddingQ8_0F16Out(
+        nint    ctx,
+        byte*   embedTable,
+        int*    tokenIds,
+        ushort* output,
+        int     vocabSize,
+        int     hiddenSize,
+        int     seqLen);
+
     // ── Attention ─────────────────────────────────────────────────────────────────
 
     /// <summary>FP16 Q/K/V/output attention. Buffers passed as ushort* (same layout as Half).</summary>
