@@ -11,16 +11,20 @@ if (args.Length < 1)
 
 string modelPath = args[0];
 int port = 8080;
+string device = "cpu";
 for (int i = 1; i < args.Length - 1; i++)
 {
     if (args[i] == "--port" && int.TryParse(args[i + 1], out var p))
         port = p;
+    if (args[i] == "--device" && string.Equals(args[i + 1], "gpu", StringComparison.InvariantCultureIgnoreCase))
+        device = "gpu";
 }
 
 var options = new ServerOptions
 {
     Model = modelPath,
     Port = port,
+    Device = device,
     Warmup = WarmupOptions.Disabled,
 };
 
