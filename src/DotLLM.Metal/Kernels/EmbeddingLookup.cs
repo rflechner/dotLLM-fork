@@ -214,4 +214,43 @@ public static class EmbeddingLookup
             throw new InvalidOperationException(
                 $"Metal embedding_{embedDtype}_f32out failed with code {code}.");
     }
+
+    /// <summary>
+    /// Forward-pass entry point with FP16 output. Used by the FP16 forward path so
+    /// the embedding result drops straight into the FP16 hidden-state buffer with
+    /// no FP32 intermediate.
+    /// </summary>
+    public static unsafe void ExecuteF16Out(
+        MetalContext     ctx,
+        nint             embedTable,
+        QuantizationType embedDtype,
+        nint             tokenIds,
+        nint             output,
+        int              seqLen,
+        int              hiddenSize,
+        int              vocabSize)
+    {
+        int code = embedDtype switch
+        {
+            QuantizationType.F32  => MetalNative.EmbeddingF32F16Out(
+                ctx.Handle, (float*)embedTable,  (int*)tokenIds, (ushort*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            QuantizationType.F16  => MetalNative.EmbeddingF16F16Out(
+                ctx.Handle, (ushort*)embedTable, (int*)tokenIds, (ushort*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            QuantizationType.Q8_0 => MetalNative.EmbeddingQ8_0F16Out(
+                ctx.Handle, (byte*)embedTable,   (int*)tokenIds, (ushort*)output,
+                vocabSize, hiddenSize, seqLen),
+
+            _ => throw new NotSupportedException(
+                $"Embedding type {embedDtype} not supported on Metal yet. " +
+                $"Add a dedicated kernel or load the model with DequantToFp16Strategy."),
+        };
+
+        if (code != 0)
+            throw new InvalidOperationException(
+                $"Metal embedding_{embedDtype}_f16out failed with code {code}.");
+    }
 }

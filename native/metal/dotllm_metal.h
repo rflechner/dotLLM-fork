@@ -238,6 +238,36 @@ int dotllm_metal_embedding_q8_0_f32out(
     int32_t        hidden_size,
     int32_t        seq_len);
 
+/// Embedding lookup — FP32 table → FP16 output (cast on the fly).
+int dotllm_metal_embedding_f32_f16out(
+    dotllm_metal_context* ctx,
+    const float*    embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len);
+
+/// Embedding lookup — FP16 table → FP16 output (straight copy of half rows).
+int dotllm_metal_embedding_f16_f16out(
+    dotllm_metal_context* ctx,
+    const uint16_t* embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len);
+
+/// Embedding lookup — Q8_0 quantized table → FP16 output (dequantize on the fly).
+int dotllm_metal_embedding_q8_0_f16out(
+    dotllm_metal_context* ctx,
+    const uint8_t*  embed_table,
+    const int32_t*  token_ids,
+    uint16_t*       output,
+    int32_t         vocab_size,
+    int32_t         hidden_size,
+    int32_t         seq_len);
+
 // ── Attention ────────────────────────────────────────────────────────────────
 
 /// Tiled scaled dot-product attention: FP16 Q/K/V/output, FP32 accumulation.
