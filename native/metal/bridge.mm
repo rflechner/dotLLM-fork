@@ -4,9 +4,21 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <string.h>
-#include "dotllm_metal.h"
+#include <unistd.h>     // getpagesize
 #include "dotllm_core.h"
+#include "dotllm_metal.h"
 #include "metal_kv_cache.mm"
+
+// Internal record for a memory region registered via dotllm_metal_register_buffer.
+// Holds the MTLBuffer with a strong reference so ARC retains it for the
+// region's lifetime.
+@interface DotLLMRegion : NSObject
+@property (assign, nonatomic) const void*     base;
+@property (assign, nonatomic) size_t          length;
+@property (strong, nonatomic) id<MTLBuffer>   buffer;
+@end
+@implementation DotLLMRegion
+@end
 
 // Name of the pre-compiled archive produced by build.sh. Must sit next to
 // libdotllmmetal.dylib in the deployment layout. Defined in one place so
@@ -54,6 +66,7 @@ dotllm_metal_context* dotllm_metal_create_context(void)
     ctx->library   = library;
     ctx->pipelines = [NSMutableDictionary new];
     ctx->shared_buffers = [NSMapTable strongToStrongObjectsMapTable];
+    ctx->regions        = [NSMutableArray new];
     return ctx;
 }
 
@@ -97,13 +110,90 @@ extern "C" void dotllm_metal_free_shared(dotllm_metal_context* ctx, void* ptr)
     // ARC releases the MTLBuffer when removed.
 }
 
+// ── Zero-copy registration of caller-owned memory (e.g. GGUF mmap) ───────────
+//
+// `newBufferWithBytesNoCopy:length:options:deallocator:` requires both the
+// pointer and length to be page-aligned (vm_page_size, usually 16 KiB on
+// Apple Silicon). Caller must keep the underlying memory alive for the
+// buffer's lifetime — we pass a nil deallocator so Metal never touches it.
+//
+// Typical use: register the entire GGUF mmap once; per-tensor pointers
+// (mmap_base + tensor_offset) are then resolved via lookup_shared_region
+// which returns the (buffer, offset) pair for kernel encoding.
+
+extern "C" int dotllm_metal_register_buffer(
+    dotllm_metal_context* ctx, const void* ptr, size_t bytes)
+{
+    if (!ctx || !ptr || bytes == 0) return -1;
+
+    const size_t page = (size_t)getpagesize();
+    if (((uintptr_t)ptr & (page - 1)) != 0) {
+        NSLog(@"dotllm_metal_register_buffer: pointer %p is not page-aligned (page=%zu)",
+              ptr, page);
+        return -2;
+    }
+
+    // Round length up to the next page multiple — Metal mandates it, and
+    // since the trailing pages are owned by the caller (mmap allocates by
+    // whole pages anyway), this is safe.
+    size_t aligned = (bytes + page - 1) & ~(page - 1);
+
+    id<MTLBuffer> buf = [ctx->device newBufferWithBytesNoCopy:(void*)ptr
+                                                       length:(NSUInteger)aligned
+                                                      options:MTLResourceStorageModeShared
+                                                  deallocator:nil];
+    if (!buf) {
+        NSLog(@"dotllm_metal_register_buffer: newBufferWithBytesNoCopy failed "
+              @"(ptr=%p, bytes=%zu, aligned=%zu)", ptr, bytes, aligned);
+        return -3;
+    }
+
+    DotLLMRegion* region = [DotLLMRegion new];
+    region.base   = ptr;
+    region.length = aligned;
+    region.buffer = buf;
+    [ctx->regions addObject:region];
+    return 0;
+}
+
+extern "C" void dotllm_metal_unregister_buffer(
+    dotllm_metal_context* ctx, const void* ptr)
+{
+    if (!ctx || !ptr) return;
+    NSUInteger idx = [ctx->regions indexOfObjectPassingTest:
+        ^BOOL(DotLLMRegion* r, NSUInteger, BOOL*) { return r.base == ptr; }];
+    if (idx != NSNotFound)
+        [ctx->regions removeObjectAtIndex:idx];
+    // ARC releases the MTLBuffer when the region object is removed.
+}
+
 // Returns the MTLBuffer backing `ptr` if it was allocated via alloc_shared,
 // otherwise nil. Used by kernels to detect GPU-resident buffers and skip the
 // CPU→Metal copy. Phase 2 will route most kernels through this lookup.
-static id<MTLBuffer> lookup_shared_buffer(dotllm_metal_context* ctx, const void* ptr)
+// For exact-pointer hits (alloc_shared), out_offset is set to 0.
+// For range hits (register_buffer), out_offset = ptr - region.base.
+static id<MTLBuffer> lookup_shared_buffer(
+    dotllm_metal_context* ctx, const void* ptr, NSUInteger* out_offset)
 {
+    if (out_offset) *out_offset = 0;
     if (!ctx || !ptr) return nil;
-    return [ctx->shared_buffers objectForKey:[NSValue valueWithPointer:(void*)ptr]];
+
+    // Fast path: exact-match (alloc_shared pointers).
+    id<MTLBuffer> exact = [ctx->shared_buffers
+        objectForKey:[NSValue valueWithPointer:(void*)ptr]];
+    if (exact) return exact;
+
+    // Slow path: range scan over registered regions. Number of regions is
+    // tiny (typically 1: the GGUF mmap) so a linear scan is fine.
+    const uintptr_t addr = (uintptr_t)ptr;
+    for (DotLLMRegion* r in ctx->regions) {
+        const uintptr_t base = (uintptr_t)r.base;
+        if (addr >= base && addr < base + r.length) {
+            if (out_offset) *out_offset = (NSUInteger)(addr - base);
+            return r.buffer;
+        }
+    }
+    return nil;
 }
 
 // `shaderPath` is kept in the signature for backward source compatibility

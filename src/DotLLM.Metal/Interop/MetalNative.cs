@@ -33,4 +33,23 @@ internal static partial class MetalNative
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_free_shared")]
     [SuppressGCTransition]
     internal static partial void FreeShared(nint ctx, nint ptr);
+
+    /// <summary>
+    /// Wraps a caller-owned page-aligned memory region (e.g. an mmap'd GGUF
+    /// file) as a zero-copy MTLBuffer. Pointers within <c>[ptr, ptr+bytes)</c>
+    /// become eligible for zero-copy kernel encoding (the kernel-side helper
+    /// recovers the MTLBuffer and the offset within it).
+    /// Caller MUST keep the memory alive (and not unmap it) until the matching
+    /// <see cref="UnregisterBuffer"/> call or context destruction.
+    /// Returns 0 on success, negative on failure (alignment or OOM).
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_register_buffer")]
+    internal static partial int RegisterBuffer(nint ctx, nint ptr, nuint bytes);
+
+    /// <summary>
+    /// Unregisters a region previously passed to <see cref="RegisterBuffer"/>.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_unregister_buffer")]
+    [SuppressGCTransition]
+    internal static partial void UnregisterBuffer(nint ctx, nint ptr);
 }
