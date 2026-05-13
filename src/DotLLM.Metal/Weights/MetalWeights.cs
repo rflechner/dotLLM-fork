@@ -83,7 +83,7 @@ public sealed class MetalWeights : IDisposable
             var tokenEmbedding = LoadProjection(ctx, gguf, "token_embd.weight", strategy, owned);
 
             // Output norm — always FP16, mmap-direct.
-            nint outNorm = LoadVectorFp16(gguf, "output_norm.weight", owned);
+            nint outNorm = LoadVectorFp16(ctx, gguf, "output_norm.weight", owned);
 
             // LM head — falls back to token_embd when tied (Llama 3.2 1B/3B, small Qwen).
             bool hasOutput = gguf.TensorsByName.ContainsKey("output.weight");
@@ -140,21 +140,21 @@ public sealed class MetalWeights : IDisposable
             Down = LoadProjection(ctx, gguf, $"blk.{i}.ffn_down.weight", strategy, owned),
 
             // RMSNorm scales — required.
-            AttnNormWeight = LoadVectorFp16(gguf, $"blk.{i}.attn_norm.weight", owned),
-            FfnNormWeight  = LoadVectorFp16(gguf, $"blk.{i}.ffn_norm.weight", owned),
+            AttnNormWeight = LoadVectorFp16(ctx, gguf, $"blk.{i}.attn_norm.weight", owned),
+            FfnNormWeight  = LoadVectorFp16(ctx, gguf, $"blk.{i}.ffn_norm.weight", owned),
 
             // QK-norm — optional (Qwen3, Cohere).
-            QNormWeight = TryLoadVectorFp16(gguf, $"blk.{i}.attn_q_norm.weight", owned),
-            KNormWeight = TryLoadVectorFp16(gguf, $"blk.{i}.attn_k_norm.weight", owned),
+            QNormWeight = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_q_norm.weight", owned),
+            KNormWeight = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_k_norm.weight", owned),
 
             // Biases — optional (Qwen2 Q/K/V).
-            QBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_q.bias", owned),
-            KBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_k.bias", owned),
-            VBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_v.bias", owned),
-            OBias    = TryLoadVectorFp16(gguf, $"blk.{i}.attn_output.bias", owned),
-            GateBias = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_gate.bias", owned),
-            UpBias   = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_up.bias", owned),
-            DownBias = TryLoadVectorFp16(gguf, $"blk.{i}.ffn_down.bias", owned),
+            QBias    = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_q.bias", owned),
+            KBias    = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_k.bias", owned),
+            VBias    = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_v.bias", owned),
+            OBias    = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.attn_output.bias", owned),
+            GateBias = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.ffn_gate.bias", owned),
+            UpBias   = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.ffn_up.bias", owned),
+            DownBias = TryLoadVectorFp16(ctx, gguf, $"blk.{i}.ffn_down.bias", owned),
         };
     }
 

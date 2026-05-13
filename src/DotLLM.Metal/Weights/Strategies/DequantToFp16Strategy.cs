@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Metal.Interop;
 using DotLLM.Metal.Kernels;
 
 namespace DotLLM.Metal.Weights.Strategies;
@@ -37,7 +38,7 @@ public sealed class DequantToFp16Strategy : IWeightLoadStrategy
         int totalElements = src.OutputDim * src.InputDim;
 
         // 1. Allocate the FP16 destination buffer (64-byte aligned per project convention).
-        nint dst = AllocFp16Aligned(totalElements);
+        nint dst = AllocFp16Aligned(ctx, totalElements);
 
         // 2. Wrap the raw mmap range and the destination as Spans.
         //    The Dequant API takes Span<byte> / Span<Half> — we cannot pass
@@ -106,9 +107,9 @@ public sealed class DequantToFp16Strategy : IWeightLoadStrategy
     /// 64-byte alignment matches AVX-512 / cache-line conventions used elsewhere
     /// in the project. The caller is responsible for freeing via NativeMemory.AlignedFree.
     /// </summary>
-    private static unsafe nint AllocFp16Aligned(int count)
+    private static IntPtr AllocFp16Aligned(MetalContext ctx, int count)
     {
         nuint bytes = (nuint)count * sizeof(ushort);
-        return (nint)NativeMemory.AlignedAlloc(bytes, alignment: 64);
+        return MetalNative.AllocShared(ctx.Handle, bytes);
     }
 }

@@ -53,14 +53,57 @@ dotllm_metal_context* dotllm_metal_create_context(void)
     ctx->queue     = queue;
     ctx->library   = library;
     ctx->pipelines = [NSMutableDictionary new];
+    ctx->shared_buffers = [NSMapTable strongToStrongObjectsMapTable];
     return ctx;
 }
 
 void dotllm_metal_destroy_context(dotllm_metal_context* ctx)
 {
     if (!ctx) return;
-    // ARC releases device, queue, pipelines automatically
+    // ARC releases device, queue, pipelines, shared_buffers (and the MTLBuffers
+    // they retain) automatically.
     delete ctx;
+}
+
+// ── Shared-memory allocation (zero-copy backing for forward state) ────────────
+//
+// On Apple Silicon, MTLResourceStorageModeShared buffers expose their bytes via
+// `.contents` — the same physical memory the GPU reads. A C# pointer obtained
+// from dotllm_metal_alloc_shared can be:
+//   - Read/written by the CPU directly (it's just RAM).
+//   - Looked up to recover the backing MTLBuffer for zero-copy kernel encoding.
+// The map keeps a strong reference to the MTLBuffer; calling free_shared (or
+// destroying the context) releases it.
+
+extern "C" void* dotllm_metal_alloc_shared(dotllm_metal_context* ctx, size_t bytes)
+{
+    if (!ctx || bytes == 0) return nullptr;
+
+    id<MTLBuffer> buf = [ctx->device newBufferWithLength:(NSUInteger)bytes
+                                                 options:MTLResourceStorageModeShared];
+    if (!buf) return nullptr;
+
+    void* ptr = [buf contents];
+    if (!ptr) return nullptr;
+
+    [ctx->shared_buffers setObject:buf forKey:[NSValue valueWithPointer:ptr]];
+    return ptr;
+}
+
+extern "C" void dotllm_metal_free_shared(dotllm_metal_context* ctx, void* ptr)
+{
+    if (!ctx || !ptr) return;
+    [ctx->shared_buffers removeObjectForKey:[NSValue valueWithPointer:ptr]];
+    // ARC releases the MTLBuffer when removed.
+}
+
+// Returns the MTLBuffer backing `ptr` if it was allocated via alloc_shared,
+// otherwise nil. Used by kernels to detect GPU-resident buffers and skip the
+// CPU→Metal copy. Phase 2 will route most kernels through this lookup.
+static id<MTLBuffer> lookup_shared_buffer(dotllm_metal_context* ctx, const void* ptr)
+{
+    if (!ctx || !ptr) return nil;
+    return [ctx->shared_buffers objectForKey:[NSValue valueWithPointer:(void*)ptr]];
 }
 
 // `shaderPath` is kept in the signature for backward source compatibility

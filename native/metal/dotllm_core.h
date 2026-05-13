@@ -18,6 +18,11 @@ struct dotllm_metal_context {
     id<MTLCommandQueue> queue;
     id<MTLLibrary>      library;       // pre-compiled dotllm_kernels.metallib, loaded once
     NSMutableDictionary<NSString*, id<MTLComputePipelineState>>* pipelines;
+
+    // Maps shared-memory pointers (MTLBuffer.contents) to their backing MTLBuffer.
+    // Populated by dotllm_metal_alloc_shared. Allows kernels to detect
+    // GPU-resident buffers by pointer and skip CPU↔Metal copies.
+    NSMapTable<NSValue*, id<MTLBuffer>>* shared_buffers;
 };
 
 

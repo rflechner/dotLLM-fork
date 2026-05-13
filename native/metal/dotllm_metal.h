@@ -1,5 +1,6 @@
 #pragma once
 #include <stdint.h>
+#include <stddef.h>
 #include "dotllm_core.h"
 
 #ifdef __cplusplus
@@ -55,6 +56,21 @@ dotllm_metal_context* dotllm_metal_create_context(void);
 
 /// Destroys the context and releases all Metal resources.
 void dotllm_metal_destroy_context(dotllm_metal_context* ctx);
+
+/// Allocates `bytes` of MTLResourceStorageModeShared memory and returns the
+/// `.contents` pointer. The backing MTLBuffer is retained by the context until
+/// dotllm_metal_free_shared is called or the context is destroyed.
+///
+/// On Apple Silicon, the returned pointer is regular host RAM that the GPU can
+/// also read/write directly — the same bytes are visible to both sides without
+/// any copy or synchronisation.
+///
+/// Returns NULL on OOM or invalid arguments.
+void* dotllm_metal_alloc_shared(dotllm_metal_context* ctx, size_t bytes);
+
+/// Releases a buffer previously returned by dotllm_metal_alloc_shared.
+/// Safe to call with a NULL pointer.
+void dotllm_metal_free_shared(dotllm_metal_context* ctx, void* ptr);
 
 /// Element-wise addition: result[i] = a[i] + b[i]  (all FP32)
 /// Port of add_f32.cu::add_f32
