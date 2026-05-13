@@ -2,6 +2,7 @@ using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Cpu.Kernels;
+using DotLLM.Metal.Interop;
 using DotLLM.Metal.Weights.Strategies;
 using DotLLM.Models.Gguf;
 using static DotLLM.Metal.Helpers.LoadGgufHelpers;
@@ -18,6 +19,8 @@ public sealed class MetalWeights : IDisposable
 {
     private readonly GgufFile _gguf;
     private readonly nint[]   _ownedFp16Buffers;   // freed in Dispose
+    private readonly nint     _ctxHandle;          // for UnregisterBuffer on dispose
+    private readonly nint     _registeredMmapBase; // 0 if no zero-copy region
     private bool _disposed;
 
     /// <summary>Per-layer weights (length = <see cref="ModelConfig.NumLayers"/>).</summary>
@@ -46,16 +49,20 @@ public sealed class MetalWeights : IDisposable
         LoadedWeight lmHead,
         nint outputNormWeight,
         nint[] ownedFp16Buffers,
-        string strategyName)
+        string strategyName,
+        nint ctxHandle,
+        nint registeredMmapBase)
     {
-        _gguf             = gguf;
-        Config            = config;
-        Layers            = layers;
-        TokenEmbedding    = tokenEmbedding;
-        LmHead            = lmHead;
-        OutputNormWeight  = outputNormWeight;
-        _ownedFp16Buffers = ownedFp16Buffers;
-        StrategyName      = strategyName;
+        _gguf               = gguf;
+        Config              = config;
+        Layers              = layers;
+        TokenEmbedding      = tokenEmbedding;
+        LmHead              = lmHead;
+        OutputNormWeight    = outputNormWeight;
+        _ownedFp16Buffers   = ownedFp16Buffers;
+        StrategyName        = strategyName;
+        _ctxHandle          = ctxHandle;
+        _registeredMmapBase = registeredMmapBase;
     }
 
     /// <summary>
@@ -72,6 +79,21 @@ public sealed class MetalWeights : IDisposable
 
         // Track every FP16 buffer the strategy allocates so we can free them later.
         var owned = new List<nint>(capacity: config.NumLayers * 7 + 2);
+
+        // Register the entire GGUF mmap as a single zero-copy MTLBuffer. Every
+        // per-tensor pointer (mmap_base + tensor_offset) then falls inside this
+        // region and kernels can recover the MTLBuffer + offset for zero-copy
+        // encoding instead of memcpy'ing the weight bytes on each call.
+        nint registeredMmapBase = 0;
+        if (gguf.MmapBasePointer != 0 && gguf.MmapLength > 0)
+        {
+            int rc = MetalNative.RegisterBuffer(
+                ctx.Handle, gguf.MmapBasePointer, (nuint)gguf.MmapLength);
+            if (rc == 0)
+                registeredMmapBase = gguf.MmapBasePointer;
+            // rc != 0 is non-fatal: weights remain CPU-side; kernels fall back
+            // to their existing newBufferWithBytes+memcpy paths.
+        }
 
         try
         {
@@ -93,7 +115,7 @@ public sealed class MetalWeights : IDisposable
 
             return new MetalWeights(
                 gguf, config, layers, tokenEmbedding, lmHead, outNorm,
-                owned.ToArray(), strategy.Name);
+                owned.ToArray(), strategy.Name, ctx.Handle, registeredMmapBase);
         }
         catch
         {
@@ -101,6 +123,8 @@ public sealed class MetalWeights : IDisposable
             // dispose the gguf. Don't leak.
             foreach (var ptr in owned)
                 FreeFp16(ptr);
+            if (registeredMmapBase != 0)
+                MetalNative.UnregisterBuffer(ctx.Handle, registeredMmapBase);
             gguf.Dispose();
             throw;
         }
@@ -114,6 +138,11 @@ public sealed class MetalWeights : IDisposable
 
         foreach (var ptr in _ownedFp16Buffers)
             FreeFp16(ptr);
+
+        // Unregister BEFORE unmapping — once the mmap is gone the MTLBuffer
+        // would reference freed virtual memory.
+        if (_registeredMmapBase != 0)
+            MetalNative.UnregisterBuffer(_ctxHandle, _registeredMmapBase);
 
         _gguf.Dispose();
     }

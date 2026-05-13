@@ -72,6 +72,25 @@ void* dotllm_metal_alloc_shared(dotllm_metal_context* ctx, size_t bytes);
 /// Safe to call with a NULL pointer.
 void dotllm_metal_free_shared(dotllm_metal_context* ctx, void* ptr);
 
+/// Registers a caller-owned memory region (e.g. a memory-mapped GGUF file) as
+/// a zero-copy MTLBuffer backed by MTLResourceStorageModeShared. Kernels can
+/// then recover the MTLBuffer (and the offset within it) for any pointer that
+/// falls inside [ptr, ptr+bytes), eliminating CPU→GPU copies.
+///
+/// Requirements:
+///   - `ptr` must be page-aligned (`getpagesize()`, 16 KiB on Apple Silicon).
+///   - `bytes` is rounded up to the next page multiple internally.
+///   - The caller MUST keep the memory alive (and not unmap it) until
+///     dotllm_metal_unregister_buffer is called or the context is destroyed.
+///
+/// Returns 0 on success; negative on failure (alignment/OOM).
+int dotllm_metal_register_buffer(
+    dotllm_metal_context* ctx, const void* ptr, size_t bytes);
+
+/// Unregisters a region previously passed to dotllm_metal_register_buffer.
+/// Releases the backing MTLBuffer. Safe to call with an unknown pointer.
+void dotllm_metal_unregister_buffer(dotllm_metal_context* ctx, const void* ptr);
+
 /// Element-wise addition: result[i] = a[i] + b[i]  (all FP32)
 /// Port of add_f32.cu::add_f32
 int dotllm_metal_add_f32(
