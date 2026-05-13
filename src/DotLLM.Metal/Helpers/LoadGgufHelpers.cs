@@ -1,5 +1,6 @@
 using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Metal.Interop;
 using DotLLM.Models.Gguf;
 
 namespace DotLLM.Metal.Helpers;
@@ -16,7 +17,7 @@ public static class LoadGgufHelpers
     /// Norm weights and biases are commonly stored as FP32 in GGUF, while Metal
     /// kernels consume FP16 pointers.
     /// </summary>
-    public static unsafe nint LoadVectorFp16(GgufFile gguf, string tensorName, List<nint> owned)
+    public static unsafe nint LoadVectorFp16(MetalContext ctx, GgufFile gguf, string tensorName, List<nint> owned)
     {
         var desc = gguf.TensorsByName[tensorName];
         int elementCount = checked((int)desc.Shape.ElementCount);
@@ -29,7 +30,7 @@ public static class LoadGgufHelpers
 
             case QuantizationType.F32:
             {
-                nint dst = AllocFp16Aligned(elementCount);
+                nint dst = AllocFp16Aligned(ctx, elementCount);
                 var srcSpan = new ReadOnlySpan<float>((void*)src, elementCount);
                 var dstSpan = new Span<Half>((void*)dst, elementCount);
 
@@ -50,22 +51,24 @@ public static class LoadGgufHelpers
     /// <summary>
     /// Loads an optional 1-D GGUF tensor as FP16. Returns 0 when absent.
     /// </summary>
-    public static nint TryLoadVectorFp16(GgufFile gguf, string tensorName, List<nint> owned)
+    public static nint TryLoadVectorFp16(MetalContext ctx, GgufFile gguf, string tensorName, List<nint> owned)
     {
         return gguf.TensorsByName.ContainsKey(tensorName)
-            ? LoadVectorFp16(gguf, tensorName, owned)
+            ? LoadVectorFp16(ctx, gguf, tensorName, owned)
             : 0;
     }
 
     /// <summary>
     /// Allocates memory aligned to a 64-byte boundary, sufficient to store the given number of FP16 elements.
     /// </summary>
+    /// <param name="ctx">Metal context for memory allocation</param>
     /// <param name="elementCount">The number of FP16 elements to allocate memory for.</param>
     /// <returns>A pointer to the allocated, aligned memory block.</returns>
-    public static unsafe nint AllocFp16Aligned(int elementCount)
+    public static nint AllocFp16Aligned(MetalContext ctx, int elementCount)
     {
         nuint bytes = checked((nuint)elementCount * sizeof(ushort));
-        return (nint)NativeMemory.AlignedAlloc(bytes, alignment: 64);
+
+        return MetalNative.AllocShared(ctx.Handle, bytes);
     }
 
     /// <summary>
