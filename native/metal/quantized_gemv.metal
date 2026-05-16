@@ -29,7 +29,12 @@ using namespace metal;
 
 // ── quantized_gemv_q8_0 ──────────────────────────────────────────────────────
 // Q8_0: 34 bytes per 32 values (2-byte half scale + 32 int8 weights).
-// Port of quantized_gemv.cu::quantized_gemv_q8_0
+//
+// Vectorized inner loop: 8 × float4 FMAs instead of 32 scalar FMAs.
+//   - x[b*32..b*32+31] is 64-byte aligned (b*32*sizeof(half) = b*64) → safe half4 loads.
+//   - weight quants start at block+2 (2-byte aligned, not always 4-byte). Apple
+//     GPUs accept the misalignment at a minor cost; this is still net positive
+//     because we issue 4× fewer load instructions and 4× fewer FMAs.
 kernel void quantized_gemv_q8_0(
     device const uchar* weight [[buffer(0)]],
     device const half*  x      [[buffer(1)]],
@@ -50,12 +55,21 @@ kernel void quantized_gemv_q8_0(
     {
         device const uchar* block = w_row + b * 34;
         float d = float(*(device const half*)block);
-        device const char* qs = (device const char*)(block + 2);
 
-        float s = 0.0f;
-        for (int j = 0; j < 32; j++)
-            s += float(qs[j]) * float(x[b * 32 + j]);
-        acc += d * s;
+        // 32 int8 quants as 8 × packed_char4 (alignment 1 — `char4` requires
+        // 4-byte alignment, which `block + 2` does NOT satisfy for arbitrary rows).
+        device const packed_char4* qs4 = (device const packed_char4*)(block + 2);
+        // 32 half activations as 8 × half4. x base is 16-byte aligned and
+        // b*32*sizeof(half) = b*64 → always 8-byte aligned. Safe.
+        device const half4* x4  = (device const half4*)(x + b * 32);
+
+        float4 s4 = float4(0.0f);
+        for (int j = 0; j < 8; j++) {
+            float4 qf = float4(char4(qs4[j]));   // packed → char4 → signed widen
+            float4 xf = float4(x4[j]);
+            s4 = fma(qf, xf, s4);
+        }
+        acc += d * (s4.x + s4.y + s4.z + s4.w);
     }
 
     threadgroup float ws[32];
@@ -163,13 +177,23 @@ kernel void quantized_gemv_q4_k(
             device const uchar* pair_qs   = qs + pair * 32;
             int                 base_x    = sb * 256 + pair * 64;
 
-            for (int j = 0; j < 32; j++)
+            // Vectorized inner loop: 8 batches of 4 quants each.
+            // - pair_qs is at `qs + pair*32`. qs = block + 16, block is 144-aligned
+            //   only at row boundaries → use packed_uchar4 (alignment 1).
+            // - x base_x = sb*256 + pair*64 → multiple of 64 → 64-byte aligned
+            //   (half4 alignment requires 8 → easily satisfied).
+            for (int j = 0; j < 32; j += 4)
             {
-                uint  bv     = pair_qs[j];
-                float x_even = float(x[base_x + j]);
-                float x_odd  = float(x[base_x + j + 32]);
-                acc += (scale0 * float(bv & 0x0Fu) - min0) * x_even;
-                acc += (scale1 * float(bv >> 4)    - min1) * x_odd;
+                uchar4 bv4 = uchar4(*(device const packed_uchar4*)(pair_qs + j));
+                float4 xe = float4(*(device const half4*)(x + base_x + j));
+                float4 xo = float4(*(device const half4*)(x + base_x + j + 32));
+
+                // Low nibble = even sub-block, high nibble = odd sub-block.
+                float4 lo = float4(bv4 & uchar4(0x0F));
+                float4 hi = float4(bv4 >> 4);
+
+                acc += dot(scale0 * lo - float4(min0), xe);
+                acc += dot(scale1 * hi - float4(min1), xo);
             }
         }
     }
@@ -248,7 +272,15 @@ kernel void quantized_gemv_q5_k(
 
 // ── quantized_gemv_q6_k ──────────────────────────────────────────────────────
 // Q6_K: 210 bytes per 256 values (128 ql + 64 qh + 16 scales(int8) + 2 d).
-// Port of quantized_gemv.cu::quantized_gemv_q6_k
+//
+// Vectorized inner loop: each iteration processes 4 consecutive `l` values
+// using char4 / half4 ops. The four scale streams (s0..s3) and the four
+// x-windows ([l..l+3], [l+32..l+35], [l+64..l+67], [l+96..l+99]) all read
+// 4 contiguous halves at once → 4× fewer load instructions.
+//
+// `isc` (= l/16) splits each half-superblock at l=16. Within each l-batch of
+// 4, all four iterations share the same isc (since 4 < 16), so we only need
+// to refetch scales at l=0 and l=16.
 kernel void quantized_gemv_q6_k(
     device const uchar* weight [[buffer(0)]],
     device const half*  x      [[buffer(1)]],
@@ -282,24 +314,60 @@ kernel void quantized_gemv_q6_k(
             device const char*  sc_half = scales + half_idx * 8;
             int                 x_off   = base_x + half_idx * 128;
 
-            for (int l = 0; l < 32; l++)
+            // Process l in batches of 4. isc = l/16 changes only at l=0 and l=16.
+            for (int l = 0; l < 32; l += 4)
             {
                 int isc = l / 16;
-
-                int q1 = (int)((ql_half[l]      & 0x0Fu) | (((uint)(qh_half[l] >> 0) & 3u) << 4)) - 32;
-                int q2 = (int)((ql_half[l + 32] & 0x0Fu) | (((uint)(qh_half[l] >> 2) & 3u) << 4)) - 32;
-                int q3 = (int)((ql_half[l]       >> 4)   | (((uint)(qh_half[l] >> 4) & 3u) << 4)) - 32;
-                int q4 = (int)((ql_half[l + 32]  >> 4)   | (((uint)(qh_half[l] >> 6) & 3u) << 4)) - 32;
-
                 float s0 = d * float(sc_half[isc]);
                 float s1 = d * float(sc_half[isc + 2]);
                 float s2 = d * float(sc_half[isc + 4]);
                 float s3 = d * float(sc_half[isc + 6]);
 
-                acc += s0 * float(q1) * float(x[x_off + l]);
-                acc += s1 * float(q2) * float(x[x_off + l + 32]);
-                acc += s2 * float(q3) * float(x[x_off + l + 64]);
-                acc += s3 * float(q4) * float(x[x_off + l + 96]);
+                // 4 ql bytes for indices l..l+3, and another 4 at l+32..l+35.
+                // packed_uchar4 has alignment 1 — required because ql_half + l can
+                // land at an odd byte offset within a misaligned superblock base.
+                uchar4 ql_lo4 = uchar4(*(device const packed_uchar4*)(ql_half + l));
+                uchar4 ql_hi4 = uchar4(*(device const packed_uchar4*)(ql_half + l + 32));
+                uchar4 qh_4   = uchar4(*(device const packed_uchar4*)(qh_half + l));
+
+                // Decode 4 quants per stream: each is 4 bits from ql plus 2 bits from qh.
+                int4 q1_v = int4(
+                    (int)((ql_lo4.x & 0x0Fu) | (((uint)(qh_4.x >> 0) & 3u) << 4)),
+                    (int)((ql_lo4.y & 0x0Fu) | (((uint)(qh_4.y >> 0) & 3u) << 4)),
+                    (int)((ql_lo4.z & 0x0Fu) | (((uint)(qh_4.z >> 0) & 3u) << 4)),
+                    (int)((ql_lo4.w & 0x0Fu) | (((uint)(qh_4.w >> 0) & 3u) << 4))) - 32;
+                int4 q2_v = int4(
+                    (int)((ql_hi4.x & 0x0Fu) | (((uint)(qh_4.x >> 2) & 3u) << 4)),
+                    (int)((ql_hi4.y & 0x0Fu) | (((uint)(qh_4.y >> 2) & 3u) << 4)),
+                    (int)((ql_hi4.z & 0x0Fu) | (((uint)(qh_4.z >> 2) & 3u) << 4)),
+                    (int)((ql_hi4.w & 0x0Fu) | (((uint)(qh_4.w >> 2) & 3u) << 4))) - 32;
+                int4 q3_v = int4(
+                    (int)((ql_lo4.x >> 4)    | (((uint)(qh_4.x >> 4) & 3u) << 4)),
+                    (int)((ql_lo4.y >> 4)    | (((uint)(qh_4.y >> 4) & 3u) << 4)),
+                    (int)((ql_lo4.z >> 4)    | (((uint)(qh_4.z >> 4) & 3u) << 4)),
+                    (int)((ql_lo4.w >> 4)    | (((uint)(qh_4.w >> 4) & 3u) << 4))) - 32;
+                int4 q4_v = int4(
+                    (int)((ql_hi4.x >> 4)    | (((uint)(qh_4.x >> 6) & 3u) << 4)),
+                    (int)((ql_hi4.y >> 4)    | (((uint)(qh_4.y >> 6) & 3u) << 4)),
+                    (int)((ql_hi4.z >> 4)    | (((uint)(qh_4.z >> 6) & 3u) << 4)),
+                    (int)((ql_hi4.w >> 4)    | (((uint)(qh_4.w >> 6) & 3u) << 4))) - 32;
+
+                // 4 contiguous half loads per stream (16 bytes each).
+                float4 x0 = float4(*(device const half4*)(x + x_off + l));
+                float4 x1 = float4(*(device const half4*)(x + x_off + l + 32));
+                float4 x2 = float4(*(device const half4*)(x + x_off + l + 64));
+                float4 x3 = float4(*(device const half4*)(x + x_off + l + 96));
+
+                // Each stream contributes scale * dot(q, x).
+                float4 q1f = float4(q1_v);
+                float4 q2f = float4(q2_v);
+                float4 q3f = float4(q3_v);
+                float4 q4f = float4(q4_v);
+
+                acc += s0 * dot(q1f, x0);
+                acc += s1 * dot(q2f, x1);
+                acc += s2 * dot(q3f, x2);
+                acc += s3 * dot(q4f, x3);
             }
         }
     }
