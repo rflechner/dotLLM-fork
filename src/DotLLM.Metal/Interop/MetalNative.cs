@@ -52,4 +52,28 @@ internal static partial class MetalNative
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_unregister_buffer")]
     [SuppressGCTransition]
     internal static partial void UnregisterBuffer(nint ctx, nint ptr);
+
+    /// <summary>
+    /// Opens a batched forward pass. All subsequent kernel calls on this
+    /// context encode into one shared command buffer until <see cref="EndForward"/>.
+    /// Returns 0 on success, negative on error.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_begin_forward")]
+    internal static partial int BeginForward(nint ctx);
+
+    /// <summary>
+    /// Closes the active batched forward pass: commits and waits for GPU.
+    /// Returns 0 on success, negative on error.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_end_forward")]
+    internal static partial int EndForward(nint ctx);
+
+    /// <summary>
+    /// Copies <paramref name="bytes"/> from <paramref name="src"/> to
+    /// <paramref name="dst"/>. Inside a batched forward this is a GPU-side
+    /// blit (zero CPU work, sequenced with surrounding compute kernels);
+    /// outside, it falls back to a CPU memcpy.
+    /// </summary>
+    [LibraryImport(LibName, EntryPoint = "dotllm_metal_buffer_copy")]
+    internal static partial int BufferCopy(nint ctx, nint dst, nint src, nuint bytes);
 }

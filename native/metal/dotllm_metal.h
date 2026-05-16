@@ -91,6 +91,28 @@ int dotllm_metal_register_buffer(
 /// Releases the backing MTLBuffer. Safe to call with an unknown pointer.
 void dotllm_metal_unregister_buffer(dotllm_metal_context* ctx, const void* ptr);
 
+/// Begins a batched forward pass: opens a command buffer + compute encoder.
+/// While active, every kernel call encodes its dispatch into this encoder
+/// and skips its per-kernel commit/waitUntilCompleted — eliminating the
+/// per-kernel driver submission overhead (~100 µs on macOS).
+///
+/// Pair with dotllm_metal_end_forward. Nesting is not supported.
+/// Returns 0 on success, negative on error.
+int dotllm_metal_begin_forward(dotllm_metal_context* ctx);
+
+/// Ends a batched forward pass: closes the encoder, commits, and BLOCKS until
+/// the GPU finishes. After return, host reads of shared buffers see final data.
+int dotllm_metal_end_forward(dotllm_metal_context* ctx);
+
+/// Copies `bytes` from src to dst between GPU-visible buffers. Both pointers
+/// must be GPU-resident (alloc_shared or register_buffer); in standalone mode
+/// the call falls back to CPU memcpy when not registered.
+///
+/// In batched mode, the copy is encoded as a blit in the active command buffer
+/// — subsequent kernels in the same forward see the result without any CPU sync.
+int dotllm_metal_buffer_copy(
+    dotllm_metal_context* ctx, void* dst, const void* src, size_t bytes);
+
 /// Element-wise addition: result[i] = a[i] + b[i]  (all FP32)
 /// Port of add_f32.cu::add_f32
 int dotllm_metal_add_f32(
