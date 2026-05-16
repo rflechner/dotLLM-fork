@@ -4,8 +4,14 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <string.h>
-#include "dotllm_metal.h"
 #include "dotllm_core.h"
+#include "dotllm_metal.h"
+
+// Forward decl — defined in bridge.mm. Allows the KV cache to register its
+// buffers for range-based pointer lookup (needed since callers write at byte
+// offsets > 0 into the K/V buffers, which the exact-match shared_buffers map
+// cannot resolve).
+@class DotLLMRegion;
 
 // ── KV-cache (persistent MTLBuffers, zero-copy on Apple Silicon) ─────────────
 //
@@ -26,6 +32,9 @@ struct dotllm_metal_kvcache {
     int32_t  kv_stride;   // num_kv_heads * head_dim
     int32_t  max_seq_len;
     int32_t  current_length;
+    // Back-pointer to the owning context — needed at destroy time to unregister
+    // the .contents pointers from ctx->shared_buffers.
+    dotllm_metal_context* ctx;
 };
 
 extern "C" dotllm_metal_kvcache* dotllm_metal_kvcache_create(
@@ -51,11 +60,23 @@ extern "C" dotllm_metal_kvcache* dotllm_metal_kvcache_create(
         id<MTLBuffer> kb = [ctx->device newBufferWithLength:bufBytes options:MTLResourceStorageModeShared];
         id<MTLBuffer> vb = [ctx->device newBufferWithLength:bufBytes options:MTLResourceStorageModeShared];
         if (!kb || !vb) { free(kPtrs); free(vPtrs); return nullptr; }
-        
+
         [kArr addObject:kb];
         [vArr addObject:vb];
         kPtrs[i] = kb.contents;
         vPtrs[i] = vb.contents;
+
+        // Register each K/V buffer as a *region* (not as an exact-match map
+        // entry) so the buffer-copy blit can resolve writes at any byte
+        // offset within the buffer — decode appends at offset = position *
+        // bytesPerToken, which the exact-match map cannot satisfy.
+        DotLLMRegion* kr = [DotLLMRegion new];
+        kr.base = kb.contents; kr.length = bufBytes; kr.buffer = kb;
+        [ctx->regions addObject:kr];
+
+        DotLLMRegion* vr = [DotLLMRegion new];
+        vr.base = vb.contents; vr.length = bufBytes; vr.buffer = vb;
+        [ctx->regions addObject:vr];
     }
 
     auto* cache          = new dotllm_metal_kvcache();
@@ -67,16 +88,30 @@ extern "C" dotllm_metal_kvcache* dotllm_metal_kvcache_create(
     cache->kv_stride     = num_kv_heads * head_dim;
     cache->max_seq_len   = max_seq_len;
     cache->current_length = 0;
+    cache->ctx           = ctx;
     return cache;
 }
 
 extern "C" void dotllm_metal_kvcache_destroy(dotllm_metal_kvcache* cache)
 {
     if (!cache) return;
+    // Remove this cache's regions from the context so stale entries don't
+    // outlive their MTLBuffer (ARC will release when the cache is destroyed).
+    if (cache->ctx) {
+        NSMutableIndexSet* toRemove = [NSMutableIndexSet new];
+        [cache->ctx->regions enumerateObjectsUsingBlock:
+            ^(DotLLMRegion* r, NSUInteger idx, BOOL*) {
+                for (int i = 0; i < cache->num_layers; i++) {
+                    if (r.base == cache->key_ptrs[i] || r.base == cache->value_ptrs[i]) {
+                        [toRemove addIndex:idx];
+                        break;
+                    }
+                }
+            }];
+        [cache->ctx->regions removeObjectsAtIndexes:toRemove];
+    }
     free(cache->key_ptrs);
     free(cache->value_ptrs);
-    // ARC releases key_buffers / value_buffers (and the MTLBuffers they hold)
-    // when the struct is deleted.
     delete cache;
 }
 

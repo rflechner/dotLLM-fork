@@ -5,6 +5,7 @@ using DotLLM.Core.Configuration;
 using DotLLM.Core.Models;
 using DotLLM.Core.Tensors;
 using DotLLM.Cpu.Kernels;
+using DotLLM.Metal.Interop;
 using DotLLM.Metal.Kernels;
 using DotLLM.Metal.Weights;
 using DotLLM.Models.Architectures;
@@ -133,6 +134,14 @@ public sealed unsafe class MetalTransformerModel : IModel
         CopyInputToState(tokenIds, _state.TokenIds);
         CopyInputToState(positions,  _state.Positions);
 
+        // ── Open ONE command buffer for the entire forward pass ─────────────
+        // All kernels, all intra-forward buffer copies, and all KV-cache
+        // writes are encoded into this single command buffer and only
+        // committed/waited at the end. Every pointer that crosses this
+        // boundary MUST be GPU-resident (registered in shared_buffers) or
+        // BufferCopy will reject it.
+        MetalNative.BeginForward(_context.Handle);
+
         // 2. Embedding
         var embedding = _weights.TokenEmbedding;
         nint tablePtr = embedding.Fp16Pointer != 0
@@ -146,17 +155,13 @@ public sealed unsafe class MetalTransformerModel : IModel
             _state.TokenIds, _state.HiddenState,
             seqLen, Config.HiddenSize, Config.VocabSize);
 
-        Check("after embedding", _state.HiddenState, seqLen * hiddenSize);   // ← #1
-
-        // 3. Layer 0 setup
-        Memcpy(_state.Residual, _state.HiddenState, seqLen * hiddenSize);
-        Check("after memcpy residual", _state.Residual, seqLen * hiddenSize); // ← #2
+        // 3. Layer 0 setup — GPU blit (was CPU memcpy)
+        BufferCopy(_state.Residual, _state.HiddenState, seqLen * hiddenSize);
 
         RmsNormF16.Execute(_context, _state.HiddenState, _weights.Layers[0].AttnNormWeight,
                            _state.NormOutput, hiddenSize, seqLen, eps);
-        Check("after first RmsNorm", _state.NormOutput, seqLen * hiddenSize); // ← #3
 
-        // 4. Boucle des layers
+        // 4. Boucle des layers — everything stays inside the active command buffer.
         for (int layer = 0; layer < Config.NumLayers; layer++)
         {
             ref readonly var lw = ref _weights.Layers[layer];
@@ -190,8 +195,9 @@ public sealed unsafe class MetalTransformerModel : IModel
                 Check("L0: K after RoPE", _state.K, seqLen * lw.K.OutputDim);
             }
 
-            // Write current K/V into the persistent cache (CPU memcpy into shared MTLBuffer)
-            // then choose the attention path based on whether we have a Metal cache.
+            // Write current K/V into the persistent cache. Inside the active
+            // forward this is a GPU blit (no CPU sync), so attention below
+            // reads the freshly written K/V without any wait.
             if (kvCache is MetalKvCache metalCache)
             {
                 int kvStride = Config.NumKvHeads * Config.HeadDim;
@@ -245,8 +251,8 @@ public sealed unsafe class MetalTransformerModel : IModel
                 Check("L0: residual after fused-add", _state.Residual, seqLen * hiddenSize);
             }
 
-            // puis copie HiddenState → NormOutput pour la suite
-            Memcpy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
+            // GPU blit: copy HiddenState → NormOutput for the FFN input.
+            BufferCopy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
 
             // FFN
             Project(lw.Gate, _state.NormOutput, _state.FfnGate, seqLen);
@@ -277,7 +283,7 @@ public sealed unsafe class MetalTransformerModel : IModel
                     seqLen,
                     eps);
 
-                Memcpy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
+                BufferCopy(_state.NormOutput, _state.HiddenState, seqLen * hiddenSize);
             }
             else
             {
@@ -290,22 +296,23 @@ public sealed unsafe class MetalTransformerModel : IModel
             }
         }
 
-        Check("after layer loop: Residual", _state.Residual, seqLen * hiddenSize); // ← #11
-
-        // 5. Final RmsNorm — last token only
         // 5. Final RmsNorm — last token only
         nint lastHidden = _state.HiddenState + (nint)((seqLen - 1) * hiddenSize * sizeof(ushort));
         RmsNormF16.Execute(_context, lastHidden, _weights.OutputNormWeight,
             _state.NormOutput, hiddenSize, 1, eps);
-        Check("after final RmsNorm", _state.NormOutput, hiddenSize);
 
         // 6. LM head → vocab logits
         Project(_weights.LmHead, _state.NormOutput, _state.LogitsF16, seqLen: 1);
-        Check("LogitsF16", _state.LogitsF16, vocabSize); // ← #13
 
-        // 7. F16 → F32 pour le sampler
         // 7. F16 → F32 pour le sampler (vocabSize logits, dernier token uniquement)
         Convert.F16ToF32(_context, _state.LogitsF16, _state.LogitsF32, vocabSize);
+
+        // ── Close the batched command buffer and wait for the GPU ───────────
+        MetalNative.EndForward(_context.Handle);
+
+        Check("after layer loop: Residual", _state.Residual, seqLen * hiddenSize); // ← #11
+        Check("after final RmsNorm", _state.NormOutput, hiddenSize);
+        Check("LogitsF16", _state.LogitsF16, vocabSize); // ← #13
         Check("LogitsF32", _state.LogitsF32, vocabSize, isFp16: false); // ← #14
 
         // 8. Wrap en ITensor (host-readable directement, pas de D2H grâce à la mémoire unifiée)
@@ -332,6 +339,21 @@ public sealed unsafe class MetalTransformerModel : IModel
             source:      (void*)stateHiddenState,
             destination: (void*)stateResidual,
             byteCount:   (nuint)(size * sizeof(ushort)));
+    }
+
+    /// <summary>
+    /// Copies <paramref name="elementCount"/> FP16 elements from <paramref name="src"/>
+    /// to <paramref name="dst"/>. Inside a batched forward this is a GPU blit (no CPU sync);
+    /// outside it falls back to CPU memcpy via the native helper.
+    /// </summary>
+    private void BufferCopy(nint dst, nint src, int elementCount)
+    {
+        int rc = MetalNative.BufferCopy(
+            _context.Handle, dst, src, (nuint)((long)elementCount * sizeof(ushort)));
+        if (rc != 0)
+            throw new InvalidOperationException(
+                $"MetalNative.BufferCopy failed (rc={rc}). The source/destination pointers " +
+                "must be registered with the context (alloc_shared or register_buffer).");
     }
 
     private void Project(in LoadedWeight w, nint input, nint output, int seqLen)

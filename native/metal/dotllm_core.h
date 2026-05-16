@@ -33,6 +33,15 @@ struct dotllm_metal_context {
     // A tensor pointer T is owned by region R iff R.base <= T < R.base + R.length;
     // its offset inside the MTLBuffer is then (T - R.base).
     NSMutableArray<DotLLMRegion*>* regions;
+
+    // Active command-buffer batching state.
+    // When `active_enc` != nil, run_* helpers encode into the existing encoder
+    // and SKIP the per-kernel commit/waitUntilCompleted. The owning forward
+    // pass is responsible for closing it via dotllm_metal_end_forward.
+    // When nil, helpers operate in standalone mode (one CB per kernel) — the
+    // default path used by unit tests.
+    id<MTLCommandBuffer>         active_cmd;
+    id<MTLComputeCommandEncoder> active_enc;
 };
 
 
