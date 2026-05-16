@@ -72,12 +72,18 @@ public static class LoadGgufHelpers
     }
 
     /// <summary>
-    /// Frees a memory block allocated for a 1-D FP16 tensor, ensuring proper deallocation of aligned memory.
+    /// Frees an FP16 buffer previously returned by <see cref="AllocFp16Aligned"/>.
+    /// The buffer was allocated via <see cref="MetalNative.AllocShared"/>, so it
+    /// MUST be released via <see cref="MetalNative.FreeShared"/> — calling
+    /// <c>NativeMemory.AlignedFree</c> here would leak the backing MTLBuffer
+    /// (still referenced by the context's shared_buffers map) and corrupt the
+    /// Metal allocator's bookkeeping.
     /// </summary>
-    /// <param name="ptr">The pointer to the memory block to be freed. If the pointer is zero, the method does nothing.</param>
-    public static unsafe void FreeFp16(nint ptr)
+    /// <param name="ctx">The Metal context that owned the allocation.</param>
+    /// <param name="ptr">The pointer to free. No-op when zero.</param>
+    public static void FreeFp16(MetalContext ctx, nint ptr)
     {
         if (ptr != 0)
-            NativeMemory.AlignedFree((void*)ptr);
+            MetalNative.FreeShared(ctx.Handle, ptr);
     }
 }
