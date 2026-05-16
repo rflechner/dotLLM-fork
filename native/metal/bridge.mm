@@ -196,6 +196,75 @@ static id<MTLBuffer> lookup_shared_buffer(
     return nil;
 }
 
+// ── Zero-copy bind helpers (Phase 2) ─────────────────────────────────────────
+//
+// `bind_input`  : resolves a host pointer to an MTLBuffer the kernel can read.
+// `bind_output` : resolves a host pointer to an MTLBuffer the kernel will write.
+//
+// Hit (pointer found in shared_buffers or registered regions) → returns the
+//   underlying MTLBuffer plus the offset within it. No allocation, no copy.
+// Miss → allocates a fresh shared MTLBuffer; for inputs we memcpy into it;
+//   for outputs we let the caller memcpy back after the GPU finishes.
+//
+// All bytes are interpreted as a strict count (the buffer is large enough to
+// cover [ptr, ptr+bytes)); registration validates the upper bound for us.
+
+static inline id<MTLBuffer> bind_input(
+    dotllm_metal_context* ctx, const void* ptr, NSUInteger bytes,
+    NSUInteger* out_offset)
+{
+    NSUInteger offset = 0;
+    id<MTLBuffer> hit = lookup_shared_buffer(ctx, ptr, &offset);
+    if (hit) {
+        if (out_offset) *out_offset = offset;
+        return hit;
+    }
+    if (out_offset) *out_offset = 0;
+    return [ctx->device newBufferWithBytes:ptr length:bytes
+                                   options:MTLResourceStorageModeShared];
+}
+
+// In-place binding (read-modify-write). On hit, reuses the existing MTLBuffer
+// + offset (no copy). On miss, wraps the host pointer via newBufferWithBytesNoCopy
+// — same constraint as legacy call sites: ptr/length must be page-aligned.
+// This is appropriate for buffers the caller has already guaranteed to be
+// safe for zero-copy (typically forward-state allocations).
+static inline id<MTLBuffer> bind_inout(
+    dotllm_metal_context* ctx, void* ptr, NSUInteger bytes,
+    NSUInteger* out_offset)
+{
+    NSUInteger offset = 0;
+    id<MTLBuffer> hit = lookup_shared_buffer(ctx, ptr, &offset);
+    if (hit) {
+        if (out_offset) *out_offset = offset;
+        return hit;
+    }
+    if (out_offset) *out_offset = 0;
+    return [ctx->device newBufferWithBytesNoCopy:ptr length:bytes
+                                         options:MTLResourceStorageModeShared
+                                     deallocator:nil];
+}
+
+// needsCopy is set to true when the output pointer is *not* GPU-resident and
+// the caller must memcpy from the temp buffer back to the host pointer after
+// waitUntilCompleted.
+static inline id<MTLBuffer> bind_output(
+    dotllm_metal_context* ctx, void* ptr, NSUInteger bytes,
+    NSUInteger* out_offset, bool* needs_copy)
+{
+    NSUInteger offset = 0;
+    id<MTLBuffer> hit = lookup_shared_buffer(ctx, ptr, &offset);
+    if (hit) {
+        if (out_offset) *out_offset = offset;
+        if (needs_copy) *needs_copy = false;
+        return hit;
+    }
+    if (out_offset) *out_offset = 0;
+    if (needs_copy) *needs_copy = true;
+    return [ctx->device newBufferWithLength:bytes
+                                    options:MTLResourceStorageModeShared];
+}
+
 // `shaderPath` is kept in the signature for backward source compatibility
 // with the call sites, but is ignored — all functions now live in the
 // pre-loaded dotllm_kernels.metallib. The cache key is just the function name.
@@ -244,11 +313,12 @@ static int run_binary_f32_kernel(
         if (!pipeline) return -3;
 
         NSUInteger bytes = (NSUInteger)length * sizeof(float);
-        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufB = [ctx->device newBufferWithBytes:b length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufR = [ctx->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufL = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        if (!bufA || !bufB || !bufR || !bufL) return -7;
+        NSUInteger offA = 0, offB = 0, offR = 0;
+        bool needCopyR = false;
+        id<MTLBuffer> bufA = bind_input (ctx, a,      bytes, &offA);
+        id<MTLBuffer> bufB = bind_input (ctx, b,      bytes, &offB);
+        id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
+        if (!bufA || !bufB || !bufR) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -257,10 +327,10 @@ static int run_binary_f32_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufA offset:0 atIndex:0];
-        [enc setBuffer:bufB offset:0 atIndex:1];
-        [enc setBuffer:bufR offset:0 atIndex:2];
-        [enc setBuffer:bufL offset:0 atIndex:3];
+        [enc setBuffer:bufA offset:offA atIndex:0];
+        [enc setBuffer:bufB offset:offB atIndex:1];
+        [enc setBuffer:bufR offset:offR atIndex:2];
+        [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if (length > 0 && tgw > length) tgw = length;
@@ -273,7 +343,7 @@ static int run_binary_f32_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(result, bufR.contents, bytes);
+        if (needCopyR) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -294,10 +364,11 @@ static int run_unary_f32_kernel(
         if (!pipeline) return -3;
 
         NSUInteger bytes = (NSUInteger)length * sizeof(float);
-        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufR = [ctx->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufL = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        if (!bufA || !bufR || !bufL) return -7;
+        NSUInteger offA = 0, offR = 0;
+        bool needCopyR = false;
+        id<MTLBuffer> bufA = bind_input (ctx, a,      bytes, &offA);
+        id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
+        if (!bufA || !bufR) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -306,9 +377,9 @@ static int run_unary_f32_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufA offset:0 atIndex:0];
-        [enc setBuffer:bufR offset:0 atIndex:2];
-        [enc setBuffer:bufL offset:0 atIndex:3];
+        [enc setBuffer:bufA offset:offA atIndex:0];
+        [enc setBuffer:bufR offset:offR atIndex:2];
+        [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if (length > 0 && tgw > length) tgw = length;
@@ -321,7 +392,7 @@ static int run_unary_f32_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(result, bufR.contents, bytes);
+        if (needCopyR) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -351,11 +422,12 @@ extern "C" int dotllm_metal_add_f16(
         if (!pipeline) return -3;
 
         NSUInteger bytes = (NSUInteger)length * sizeof(uint16_t);
-        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufB = [ctx->device newBufferWithBytes:b length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufR = [ctx->device newBufferWithLength:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufL = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        if (!bufA || !bufB || !bufR || !bufL) return -7;
+        NSUInteger offA = 0, offB = 0, offR = 0;
+        bool needCopyR = false;
+        id<MTLBuffer> bufA = bind_input (ctx, a,      bytes, &offA);
+        id<MTLBuffer> bufB = bind_input (ctx, b,      bytes, &offB);
+        id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
+        if (!bufA || !bufB || !bufR) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -364,10 +436,10 @@ extern "C" int dotllm_metal_add_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufA offset:0 atIndex:0];
-        [enc setBuffer:bufB offset:0 atIndex:1];
-        [enc setBuffer:bufR offset:0 atIndex:2];
-        [enc setBuffer:bufL offset:0 atIndex:3];
+        [enc setBuffer:bufA offset:offA atIndex:0];
+        [enc setBuffer:bufB offset:offB atIndex:1];
+        [enc setBuffer:bufR offset:offR atIndex:2];
+        [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
         // Dispatch n/2 threads (vectorized half2); +1 handles the odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
@@ -382,7 +454,7 @@ extern "C" int dotllm_metal_add_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(result, bufR.contents, bytes);
+        if (needCopyR) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -403,11 +475,12 @@ extern "C" int dotllm_metal_add_f32_f16(
 
         NSUInteger bytesF32 = (NSUInteger)length * sizeof(float);
         NSUInteger bytesF16 = (NSUInteger)length * sizeof(uint16_t);
-        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:bytesF32 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufB = [ctx->device newBufferWithBytes:b length:bytesF16 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufR = [ctx->device newBufferWithLength:bytesF32 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufL = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        if (!bufA || !bufB || !bufR || !bufL) return -7;
+        NSUInteger offA = 0, offB = 0, offR = 0;
+        bool needCopyR = false;
+        id<MTLBuffer> bufA = bind_input (ctx, a,      bytesF32, &offA);
+        id<MTLBuffer> bufB = bind_input (ctx, b,      bytesF16, &offB);
+        id<MTLBuffer> bufR = bind_output(ctx, result, bytesF32, &offR, &needCopyR);
+        if (!bufA || !bufB || !bufR) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -416,10 +489,10 @@ extern "C" int dotllm_metal_add_f32_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufA offset:0 atIndex:0];
-        [enc setBuffer:bufB offset:0 atIndex:1];
-        [enc setBuffer:bufR offset:0 atIndex:2];
-        [enc setBuffer:bufL offset:0 atIndex:3];
+        [enc setBuffer:bufA offset:offA atIndex:0];
+        [enc setBuffer:bufB offset:offB atIndex:1];
+        [enc setBuffer:bufR offset:offR atIndex:2];
+        [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
         if (length > 0 && tgw > length) tgw = length;
@@ -432,7 +505,7 @@ extern "C" int dotllm_metal_add_f32_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(result, bufR.contents, bytesF32);
+        if (needCopyR) memcpy(result, bufR.contents, bytesF32);
         return 0;
     }
 }
@@ -465,18 +538,11 @@ extern "C" int dotllm_metal_softmax_f16(
         NSUInteger inputBytes  = (NSUInteger)(rows * cols) * sizeof(uint16_t);
         NSUInteger outputBytes = inputBytes;
 
-        id<MTLBuffer> bufInput  = [ctx->device newBufferWithBytes:input
-                                                           length:inputBytes
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOutput = [ctx->device newBufferWithLength:outputBytes
-                                                           options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufRows   = [ctx->device newBufferWithBytes:&rows
-                                                           length:sizeof(int32_t)
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufCols   = [ctx->device newBufferWithBytes:&cols
-                                                           length:sizeof(int32_t)
-                                                          options:MTLResourceStorageModeShared];
-        if (!bufInput || !bufOutput || !bufRows || !bufCols) return -7;
+        NSUInteger offIn = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufInput  = bind_input (ctx, input,  inputBytes,  &offIn);
+        id<MTLBuffer> bufOutput = bind_output(ctx, output, outputBytes, &offOut, &needCopy);
+        if (!bufInput || !bufOutput) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -485,10 +551,10 @@ extern "C" int dotllm_metal_softmax_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufInput  offset:0 atIndex:0];
-        [enc setBuffer:bufOutput offset:0 atIndex:1];
-        [enc setBuffer:bufRows   offset:0 atIndex:2];
-        [enc setBuffer:bufCols   offset:0 atIndex:3];
+        [enc setBuffer:bufInput  offset:offIn  atIndex:0];
+        [enc setBuffer:bufOutput offset:offOut atIndex:1];
+        [enc setBytes:&rows length:sizeof(int32_t) atIndex:2];
+        [enc setBytes:&cols length:sizeof(int32_t) atIndex:3];
 
         // One threadgroup per row, 256 threads per threadgroup
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
@@ -499,7 +565,7 @@ extern "C" int dotllm_metal_softmax_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -538,11 +604,12 @@ extern "C" int dotllm_metal_swiglu_f16(
         if (!pipeline) return -3;
 
         NSUInteger bytes = (NSUInteger)length * sizeof(uint16_t);
-        id<MTLBuffer> bufGate   = [ctx->device newBufferWithBytes:gate   length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufUp     = [ctx->device newBufferWithBytes:up     length:bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufResult = [ctx->device newBufferWithLength:bytes          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufLen    = [ctx->device newBufferWithBytes:&length length:sizeof(uint32_t) options:MTLResourceStorageModeShared];
-        if (!bufGate || !bufUp || !bufResult || !bufLen) return -7;
+        NSUInteger offGate = 0, offUp = 0, offR = 0;
+        bool needCopyR = false;
+        id<MTLBuffer> bufGate   = bind_input (ctx, gate,   bytes, &offGate);
+        id<MTLBuffer> bufUp     = bind_input (ctx, up,     bytes, &offUp);
+        id<MTLBuffer> bufResult = bind_output(ctx, result, bytes, &offR, &needCopyR);
+        if (!bufGate || !bufUp || !bufResult) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -551,10 +618,10 @@ extern "C" int dotllm_metal_swiglu_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufGate   offset:0 atIndex:0];
-        [enc setBuffer:bufUp     offset:0 atIndex:1];
-        [enc setBuffer:bufResult offset:0 atIndex:2];
-        [enc setBuffer:bufLen    offset:0 atIndex:3];
+        [enc setBuffer:bufGate   offset:offGate atIndex:0];
+        [enc setBuffer:bufUp     offset:offUp   atIndex:1];
+        [enc setBuffer:bufResult offset:offR    atIndex:2];
+        [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
         // Dispatch length/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
@@ -569,7 +636,7 @@ extern "C" int dotllm_metal_swiglu_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(result, bufResult.contents, bytes);
+        if (needCopyR) memcpy(result, bufResult.contents, bytes);
         return 0;
     }
 }
@@ -592,20 +659,22 @@ extern "C" int dotllm_metal_bias_add_f32(
         NSUInteger outputBytes = (NSUInteger)total * sizeof(float);
         NSUInteger biasBytes   = (NSUInteger)dim   * sizeof(uint16_t);
 
-        // output is in-place: copy in, process, copy out
-        id<MTLBuffer> bufOutput = [ctx->device newBufferWithBytes:output
-                                                           length:outputBytes
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufBias   = [ctx->device newBufferWithBytes:bias
-                                                           length:biasBytes
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufDim    = [ctx->device newBufferWithBytes:&dim
-                                                           length:sizeof(uint32_t)
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSeqLen = [ctx->device newBufferWithBytes:&seq_len
-                                                           length:sizeof(uint32_t)
-                                                          options:MTLResourceStorageModeShared];
-        if (!bufOutput || !bufBias || !bufDim || !bufSeqLen) return -7;
+        // output is in-place: zero-copy on hit, copy-in-and-out fallback on miss.
+        NSUInteger offOut = 0, offBias = 0;
+        bool needCopy = false;
+        // Manual in-place: if there's no shared mapping we need a copy IN+OUT.
+        NSUInteger offHit = 0;
+        id<MTLBuffer> bufOutput = lookup_shared_buffer(ctx, output, &offHit);
+        if (bufOutput) {
+            offOut = offHit;
+            needCopy = false;
+        } else {
+            bufOutput = [ctx->device newBufferWithBytes:output length:outputBytes
+                                                options:MTLResourceStorageModeShared];
+            needCopy = true;
+        }
+        id<MTLBuffer> bufBias = bind_input(ctx, bias, biasBytes, &offBias);
+        if (!bufOutput || !bufBias) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -614,10 +683,10 @@ extern "C" int dotllm_metal_bias_add_f32(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufOutput offset:0 atIndex:0];
-        [enc setBuffer:bufBias   offset:0 atIndex:1];
-        [enc setBuffer:bufDim    offset:0 atIndex:2];
-        [enc setBuffer:bufSeqLen offset:0 atIndex:3];
+        [enc setBuffer:bufOutput offset:offOut  atIndex:0];
+        [enc setBuffer:bufBias   offset:offBias atIndex:1];
+        [enc setBytes:&dim     length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&seq_len length:sizeof(uint32_t) atIndex:3];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if (total > 0 && tgw > total) tgw = total;
@@ -630,7 +699,7 @@ extern "C" int dotllm_metal_bias_add_f32(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -653,19 +722,19 @@ extern "C" int dotllm_metal_bias_add_f16(
         NSUInteger outputBytes = (NSUInteger)total * sizeof(uint16_t);
         NSUInteger biasBytes   = (NSUInteger)dim   * sizeof(uint16_t);
 
-        id<MTLBuffer> bufOutput = [ctx->device newBufferWithBytes:output
-                                                           length:outputBytes
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufBias   = [ctx->device newBufferWithBytes:bias
-                                                           length:biasBytes
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufDim    = [ctx->device newBufferWithBytes:&dim
-                                                           length:sizeof(uint32_t)
-                                                          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSeqLen = [ctx->device newBufferWithBytes:&seq_len
-                                                           length:sizeof(uint32_t)
-                                                          options:MTLResourceStorageModeShared];
-        if (!bufOutput || !bufBias || !bufDim || !bufSeqLen) return -7;
+        NSUInteger offOut = 0, offBias = 0;
+        bool needCopy = false;
+        NSUInteger offHit = 0;
+        id<MTLBuffer> bufOutput = lookup_shared_buffer(ctx, output, &offHit);
+        if (bufOutput) {
+            offOut = offHit;
+        } else {
+            bufOutput = [ctx->device newBufferWithBytes:output length:outputBytes
+                                                options:MTLResourceStorageModeShared];
+            needCopy = true;
+        }
+        id<MTLBuffer> bufBias = bind_input(ctx, bias, biasBytes, &offBias);
+        if (!bufOutput || !bufBias) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -674,10 +743,10 @@ extern "C" int dotllm_metal_bias_add_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufOutput offset:0 atIndex:0];
-        [enc setBuffer:bufBias   offset:0 atIndex:1];
-        [enc setBuffer:bufDim    offset:0 atIndex:2];
-        [enc setBuffer:bufSeqLen offset:0 atIndex:3];
+        [enc setBuffer:bufOutput offset:offOut  atIndex:0];
+        [enc setBuffer:bufBias   offset:offBias atIndex:1];
+        [enc setBytes:&dim     length:sizeof(uint32_t) atIndex:2];
+        [enc setBytes:&seq_len length:sizeof(uint32_t) atIndex:3];
 
         // Dispatch total/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (total / 2u) + 1u;
@@ -692,7 +761,7 @@ extern "C" int dotllm_metal_bias_add_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -726,22 +795,11 @@ extern "C" int dotllm_metal_rope_f32(
         NSUInteger kBytes   = (NSUInteger)(seq_len * num_kv_heads * head_dim) * sizeof(float);
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
 
-        id<MTLBuffer> bufQ    = [ctx->device newBufferWithBytesNoCopy:q length:qBytes
-                                    options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufK    = [ctx->device newBufferWithBytesNoCopy:k length:kBytes
-                                    options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufPos  = [ctx->device newBufferWithBytes:positions length:posBytes
-                                    options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSL   = [ctx->device newBufferWithBytes:&seq_len      length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH   = [ctx->device newBufferWithBytes:&num_heads    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNKV  = [ctx->device newBufferWithBytes:&num_kv_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD   = [ctx->device newBufferWithBytes:&head_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufRD   = [ctx->device newBufferWithBytes:&rope_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufTh   = [ctx->device newBufferWithBytes:&theta        length:sizeof(float)   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufRT   = [ctx->device newBufferWithBytes:&rope_type    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufQ || !bufK || !bufPos || !bufSL || !bufNH ||
-            !bufNKV || !bufHD || !bufRD || !bufTh || !bufRT) return -7;
+        NSUInteger offQ = 0, offK = 0, offPos = 0;
+        id<MTLBuffer> bufQ   = bind_inout(ctx, q, qBytes, &offQ);
+        id<MTLBuffer> bufK   = bind_inout(ctx, k, kBytes, &offK);
+        id<MTLBuffer> bufPos = bind_input(ctx, positions, posBytes, &offPos);
+        if (!bufQ || !bufK || !bufPos) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -750,16 +808,16 @@ extern "C" int dotllm_metal_rope_f32(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQ   offset:0 atIndex:0];
-        [enc setBuffer:bufK   offset:0 atIndex:1];
-        [enc setBuffer:bufPos offset:0 atIndex:2];
-        [enc setBuffer:bufSL  offset:0 atIndex:3];
-        [enc setBuffer:bufNH  offset:0 atIndex:4];
-        [enc setBuffer:bufNKV offset:0 atIndex:5];
-        [enc setBuffer:bufHD  offset:0 atIndex:6];
-        [enc setBuffer:bufRD  offset:0 atIndex:7];
-        [enc setBuffer:bufTh  offset:0 atIndex:8];
-        [enc setBuffer:bufRT  offset:0 atIndex:9];
+        [enc setBuffer:bufQ   offset:offQ   atIndex:0];
+        [enc setBuffer:bufK   offset:offK   atIndex:1];
+        [enc setBuffer:bufPos offset:offPos atIndex:2];
+        [enc setBytes:&seq_len      length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&num_heads    length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&num_kv_heads length:sizeof(int32_t) atIndex:5];
+        [enc setBytes:&head_dim     length:sizeof(int32_t) atIndex:6];
+        [enc setBytes:&rope_dim     length:sizeof(int32_t) atIndex:7];
+        [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
+        [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
@@ -805,22 +863,11 @@ extern "C" int dotllm_metal_rope_f16(
         NSUInteger kBytes   = (NSUInteger)(seq_len * num_kv_heads * head_dim) * sizeof(uint16_t);
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
 
-        id<MTLBuffer> bufQ    = [ctx->device newBufferWithBytesNoCopy:q length:qBytes
-                                    options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufK    = [ctx->device newBufferWithBytesNoCopy:k length:kBytes
-                                    options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufPos  = [ctx->device newBufferWithBytes:positions length:posBytes
-                                    options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSL   = [ctx->device newBufferWithBytes:&seq_len      length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH   = [ctx->device newBufferWithBytes:&num_heads    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNKV  = [ctx->device newBufferWithBytes:&num_kv_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD   = [ctx->device newBufferWithBytes:&head_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufRD   = [ctx->device newBufferWithBytes:&rope_dim     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufTh   = [ctx->device newBufferWithBytes:&theta        length:sizeof(float)   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufRT   = [ctx->device newBufferWithBytes:&rope_type    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufQ || !bufK || !bufPos || !bufSL || !bufNH ||
-            !bufNKV || !bufHD || !bufRD || !bufTh || !bufRT) return -7;
+        NSUInteger offQ = 0, offK = 0, offPos = 0;
+        id<MTLBuffer> bufQ   = bind_inout(ctx, q, qBytes, &offQ);
+        id<MTLBuffer> bufK   = bind_inout(ctx, k, kBytes, &offK);
+        id<MTLBuffer> bufPos = bind_input(ctx, positions, posBytes, &offPos);
+        if (!bufQ || !bufK || !bufPos) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -829,16 +876,16 @@ extern "C" int dotllm_metal_rope_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQ   offset:0 atIndex:0];
-        [enc setBuffer:bufK   offset:0 atIndex:1];
-        [enc setBuffer:bufPos offset:0 atIndex:2];
-        [enc setBuffer:bufSL  offset:0 atIndex:3];
-        [enc setBuffer:bufNH  offset:0 atIndex:4];
-        [enc setBuffer:bufNKV offset:0 atIndex:5];
-        [enc setBuffer:bufHD  offset:0 atIndex:6];
-        [enc setBuffer:bufRD  offset:0 atIndex:7];
-        [enc setBuffer:bufTh  offset:0 atIndex:8];
-        [enc setBuffer:bufRT  offset:0 atIndex:9];
+        [enc setBuffer:bufQ   offset:offQ   atIndex:0];
+        [enc setBuffer:bufK   offset:offK   atIndex:1];
+        [enc setBuffer:bufPos offset:offPos atIndex:2];
+        [enc setBytes:&seq_len      length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&num_heads    length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&num_kv_heads length:sizeof(int32_t) atIndex:5];
+        [enc setBytes:&head_dim     length:sizeof(int32_t) atIndex:6];
+        [enc setBytes:&rope_dim     length:sizeof(int32_t) atIndex:7];
+        [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
+        [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
@@ -879,13 +926,12 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
 
-        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:inputBytes               options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
-
-        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+        NSUInteger offIn = 0, offW = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufIn  = bind_input (ctx, input,  inputBytes,  &offIn);
+        id<MTLBuffer> bufW   = bind_input (ctx, weight, weightBytes, &offW);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, inputBytes,  &offOut, &needCopy);
+        if (!bufIn || !bufW || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -894,11 +940,11 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufIn  offset:0 atIndex:0];
-        [enc setBuffer:bufW   offset:0 atIndex:1];
-        [enc setBuffer:bufOut offset:0 atIndex:2];
-        [enc setBuffer:bufN   offset:0 atIndex:3];
-        [enc setBuffer:bufEps offset:0 atIndex:4];
+        [enc setBuffer:bufIn  offset:offIn  atIndex:0];
+        [enc setBuffer:bufW   offset:offW   atIndex:1];
+        [enc setBuffer:bufOut offset:offOut atIndex:2];
+        [enc setBytes:&n   length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&eps length:sizeof(float)   atIndex:4];
 
         // dispatchThreadgroups: launches exactly seq_len groups.
         // Each group = one token; tgSize threads collaborate on n elements.
@@ -911,7 +957,7 @@ extern "C" int dotllm_metal_rmsnorm_f32(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOut.contents, inputBytes);
+        if (needCopy) memcpy(output, bufOut.contents, inputBytes);
         return 0;
     }
 }
@@ -937,13 +983,12 @@ extern "C" int dotllm_metal_rmsnorm_f16(
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(uint16_t);
 
-        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:inputBytes               options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
-
-        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+        NSUInteger offIn = 0, offW = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufIn  = bind_input (ctx, input,  inputBytes,  &offIn);
+        id<MTLBuffer> bufW   = bind_input (ctx, weight, weightBytes, &offW);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, inputBytes,  &offOut, &needCopy);
+        if (!bufIn || !bufW || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -952,11 +997,11 @@ extern "C" int dotllm_metal_rmsnorm_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufIn  offset:0 atIndex:0];
-        [enc setBuffer:bufW   offset:0 atIndex:1];
-        [enc setBuffer:bufOut offset:0 atIndex:2];
-        [enc setBuffer:bufN   offset:0 atIndex:3];
-        [enc setBuffer:bufEps offset:0 atIndex:4];
+        [enc setBuffer:bufIn  offset:offIn  atIndex:0];
+        [enc setBuffer:bufW   offset:offW   atIndex:1];
+        [enc setBuffer:bufOut offset:offOut atIndex:2];
+        [enc setBytes:&n   length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&eps length:sizeof(float)   atIndex:4];
 
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
@@ -966,7 +1011,7 @@ extern "C" int dotllm_metal_rmsnorm_f16(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOut.contents, inputBytes);
+        if (needCopy) memcpy(output, bufOut.contents, inputBytes);
         return 0;
     }
 }
@@ -992,10 +1037,11 @@ static int run_convert_kernel(
         NSUInteger srcBytes = (NSUInteger)n * srcElemSize;
         NSUInteger dstBytes = (NSUInteger)n * dstElemSize;
 
-        id<MTLBuffer> bufSrc = [ctx->device newBufferWithBytes:src length:srcBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufDst = [ctx->device newBufferWithLength:dstBytes           options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        if (!bufSrc || !bufDst || !bufN) return -7;
+        NSUInteger offSrc = 0, offDst = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufSrc = bind_input (ctx, src, srcBytes, &offSrc);
+        id<MTLBuffer> bufDst = bind_output(ctx, dst, dstBytes, &offDst, &needCopy);
+        if (!bufSrc || !bufDst) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1004,9 +1050,9 @@ static int run_convert_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufSrc offset:0 atIndex:0];
-        [enc setBuffer:bufDst offset:0 atIndex:1];
-        [enc setBuffer:bufN   offset:0 atIndex:2];
+        [enc setBuffer:bufSrc offset:offSrc atIndex:0];
+        [enc setBuffer:bufDst offset:offDst atIndex:1];
+        [enc setBytes:&n length:sizeof(int32_t) atIndex:2];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         if ((NSUInteger)n < tgw) tgw = (NSUInteger)n;
@@ -1018,7 +1064,7 @@ static int run_convert_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(dst, bufDst.contents, dstBytes);
+        if (needCopy) memcpy(dst, bufDst.contents, dstBytes);
         return 0;
     }
 }
@@ -1045,17 +1091,10 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(float);
         NSUInteger weightBytes = (NSUInteger)head_dim * sizeof(float);
 
-        // qk is in-place: wrap host memory directly, no copy-in needed.
-        id<MTLBuffer> bufQK     = [ctx->device newBufferWithBytesNoCopy:qk length:qkBytes
-                                      options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufWeight = [ctx->device newBufferWithBytes:weight length:weightBytes
-                                      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps      length:sizeof(float)   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH     = [ctx->device newBufferWithBytes:&num_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD     = [ctx->device newBufferWithBytes:&head_dim  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSL     = [ctx->device newBufferWithBytes:&seq_len   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufQK || !bufWeight || !bufEps || !bufNH || !bufHD || !bufSL) return -7;
+        NSUInteger offQK = 0, offW = 0;
+        id<MTLBuffer> bufQK     = bind_inout(ctx, qk,     qkBytes,     &offQK);
+        id<MTLBuffer> bufWeight = bind_input(ctx, weight, weightBytes, &offW);
+        if (!bufQK || !bufWeight) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1064,12 +1103,12 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQK     offset:0 atIndex:0];
-        [enc setBuffer:bufWeight offset:0 atIndex:1];
-        [enc setBuffer:bufEps    offset:0 atIndex:2];
-        [enc setBuffer:bufNH     offset:0 atIndex:3];
-        [enc setBuffer:bufHD     offset:0 atIndex:4];
-        [enc setBuffer:bufSL     offset:0 atIndex:5];
+        [enc setBuffer:bufQK     offset:offQK atIndex:0];
+        [enc setBuffer:bufWeight offset:offW  atIndex:1];
+        [enc setBytes:&eps       length:sizeof(float)   atIndex:2];
+        [enc setBytes:&num_heads length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&head_dim  length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&seq_len   length:sizeof(int32_t) atIndex:5];
 
         // One threadgroup per (token, head) pair.
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
@@ -1106,17 +1145,10 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(uint16_t);
         NSUInteger weightBytes = (NSUInteger)head_dim * sizeof(uint16_t);
 
-        // qk is in-place: wrap host memory directly on Apple Silicon unified memory.
-        id<MTLBuffer> bufQK     = [ctx->device newBufferWithBytesNoCopy:qk length:qkBytes
-                                      options:MTLResourceStorageModeShared deallocator:nil];
-        id<MTLBuffer> bufWeight = [ctx->device newBufferWithBytes:weight length:weightBytes
-                                      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps       length:sizeof(float)   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH     = [ctx->device newBufferWithBytes:&num_heads length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD     = [ctx->device newBufferWithBytes:&head_dim  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSL     = [ctx->device newBufferWithBytes:&seq_len   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufQK || !bufWeight || !bufEps || !bufNH || !bufHD || !bufSL) return -7;
+        NSUInteger offQK = 0, offW = 0;
+        id<MTLBuffer> bufQK     = bind_inout(ctx, qk,     qkBytes,     &offQK);
+        id<MTLBuffer> bufWeight = bind_input(ctx, weight, weightBytes, &offW);
+        if (!bufQK || !bufWeight) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1125,12 +1157,12 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQK     offset:0 atIndex:0];
-        [enc setBuffer:bufWeight offset:0 atIndex:1];
-        [enc setBuffer:bufEps    offset:0 atIndex:2];
-        [enc setBuffer:bufNH     offset:0 atIndex:3];
-        [enc setBuffer:bufHD     offset:0 atIndex:4];
-        [enc setBuffer:bufSL     offset:0 atIndex:5];
+        [enc setBuffer:bufQK     offset:offQK atIndex:0];
+        [enc setBuffer:bufWeight offset:offW  atIndex:1];
+        [enc setBytes:&eps       length:sizeof(float)   atIndex:2];
+        [enc setBytes:&num_heads length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&head_dim  length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&seq_len   length:sizeof(int32_t) atIndex:5];
 
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
@@ -1139,7 +1171,6 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
         [cmd waitUntilCompleted];
 
         if (cmd.error != nil) return -11;
-        // bufQK wraps host memory directly — no memcpy needed.
         return 0;
     }
 }
@@ -1166,13 +1197,12 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
         NSUInteger outputBytes = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
 
-        id<MTLBuffer> bufIn  = [ctx->device newBufferWithBytes:input  length:inputBytes  options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufW   = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outputBytes              options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN   = [ctx->device newBufferWithBytes:&n   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps = [ctx->device newBufferWithBytes:&eps length:sizeof(float)   options:MTLResourceStorageModeShared];
-
-        if (!bufIn || !bufW || !bufOut || !bufN || !bufEps) return -7;
+        NSUInteger offIn = 0, offW = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufIn  = bind_input (ctx, input,  inputBytes,  &offIn);
+        id<MTLBuffer> bufW   = bind_input (ctx, weight, weightBytes, &offW);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, outputBytes, &offOut, &needCopy);
+        if (!bufIn || !bufW || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1181,11 +1211,11 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufIn  offset:0 atIndex:0];
-        [enc setBuffer:bufW   offset:0 atIndex:1];
-        [enc setBuffer:bufOut offset:0 atIndex:2];
-        [enc setBuffer:bufN   offset:0 atIndex:3];
-        [enc setBuffer:bufEps offset:0 atIndex:4];
+        [enc setBuffer:bufIn  offset:offIn  atIndex:0];
+        [enc setBuffer:bufW   offset:offW   atIndex:1];
+        [enc setBuffer:bufOut offset:offOut atIndex:2];
+        [enc setBytes:&n   length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&eps length:sizeof(float)   atIndex:4];
 
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
@@ -1222,15 +1252,23 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
         NSUInteger rowBytes    = (NSUInteger)n * sizeof(uint16_t);
         NSUInteger totalBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
 
-        // residual is read AND written by the kernel — copy in, copy out.
-        id<MTLBuffer> bufRes    = [ctx->device newBufferWithBytes:residual length:totalBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufX      = [ctx->device newBufferWithBytes:x        length:totalBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufW      = [ctx->device newBufferWithBytes:weight    length:rowBytes   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut    = [ctx->device newBufferWithLength:totalBytes                 options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN      = [ctx->device newBufferWithBytes:&n       length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufEps    = [ctx->device newBufferWithBytes:&eps     length:sizeof(float)   options:MTLResourceStorageModeShared];
+        // residual is read AND written by the kernel — needs both directions on miss.
+        NSUInteger offRes = 0, offX = 0, offW = 0, offOut = 0;
+        bool needCopyRes = false, needCopyOut = false;
+        NSUInteger offHit = 0;
+        id<MTLBuffer> bufRes = lookup_shared_buffer(ctx, residual, &offHit);
+        if (bufRes) {
+            offRes = offHit;
+        } else {
+            bufRes = [ctx->device newBufferWithBytes:residual length:totalBytes
+                                             options:MTLResourceStorageModeShared];
+            needCopyRes = true;
+        }
+        id<MTLBuffer> bufX   = bind_input (ctx, x,      totalBytes, &offX);
+        id<MTLBuffer> bufW   = bind_input (ctx, weight, rowBytes,   &offW);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, totalBytes, &offOut, &needCopyOut);
 
-        if (!bufRes || !bufX || !bufW || !bufOut || !bufN || !bufEps) return -7;
+        if (!bufRes || !bufX || !bufW || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1239,12 +1277,12 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufRes  offset:0 atIndex:0];
-        [enc setBuffer:bufX    offset:0 atIndex:1];
-        [enc setBuffer:bufW    offset:0 atIndex:2];
-        [enc setBuffer:bufOut  offset:0 atIndex:3];
-        [enc setBuffer:bufN    offset:0 atIndex:4];
-        [enc setBuffer:bufEps  offset:0 atIndex:5];
+        [enc setBuffer:bufRes  offset:offRes atIndex:0];
+        [enc setBuffer:bufX    offset:offX   atIndex:1];
+        [enc setBuffer:bufW    offset:offW   atIndex:2];
+        [enc setBuffer:bufOut  offset:offOut atIndex:3];
+        [enc setBytes:&n   length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&eps length:sizeof(float)   atIndex:5];
 
         // One threadgroup per token.
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
@@ -1255,9 +1293,8 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
 
         if (cmd.error != nil) return -11;
 
-        // residual was updated in-place by the kernel — write back to host.
-        memcpy(residual, bufRes.contents, totalBytes);
-        memcpy(output,   bufOut.contents, totalBytes);
+        if (needCopyRes) memcpy(residual, bufRes.contents, totalBytes);
+        if (needCopyOut) memcpy(output,   bufOut.contents, totalBytes);
         return 0;
     }
 }
@@ -1288,13 +1325,12 @@ static int run_embedding_kernel(
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
         NSUInteger outBytes = (NSUInteger)(seq_len * hidden_size) * out_elem_bytes;
 
-        id<MTLBuffer> bufTable  = [ctx->device newBufferWithBytes:embed_table length:embed_table_bytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufIds    = [ctx->device newBufferWithBytes:token_ids   length:posBytes          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut    = [ctx->device newBufferWithLength:outBytes                            options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSL     = [ctx->device newBufferWithBytes:&seq_len    length:sizeof(int32_t)   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHS     = [ctx->device newBufferWithBytes:&hidden_size length:sizeof(int32_t)  options:MTLResourceStorageModeShared];
-
-        if (!bufTable || !bufIds || !bufOut || !bufSL || !bufHS) return -7;
+        NSUInteger offTable = 0, offIds = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufTable = bind_input (ctx, embed_table, embed_table_bytes, &offTable);
+        id<MTLBuffer> bufIds   = bind_input (ctx, token_ids,   posBytes,          &offIds);
+        id<MTLBuffer> bufOut   = bind_output(ctx, output,      outBytes,          &offOut, &needCopy);
+        if (!bufTable || !bufIds || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1303,11 +1339,11 @@ static int run_embedding_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufTable offset:0 atIndex:0];
-        [enc setBuffer:bufIds   offset:0 atIndex:1];
-        [enc setBuffer:bufOut   offset:0 atIndex:2];
-        [enc setBuffer:bufSL    offset:0 atIndex:3];
-        [enc setBuffer:bufHS    offset:0 atIndex:4];
+        [enc setBuffer:bufTable offset:offTable atIndex:0];
+        [enc setBuffer:bufIds   offset:offIds   atIndex:1];
+        [enc setBuffer:bufOut   offset:offOut   atIndex:2];
+        [enc setBytes:&seq_len     length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&hidden_size length:sizeof(int32_t) atIndex:4];
 
         // One threadgroup per token; threads copy/dequantize hidden_size elements.
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
@@ -1318,7 +1354,7 @@ static int run_embedding_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOut.contents, outBytes);
+        if (needCopy) memcpy(output, bufOut.contents, outBytes);
         return 0;
     }
 }
@@ -1460,9 +1496,10 @@ static int run_attention_f16_with_kvcache(
         NSUInteger qBytes   = (NSUInteger)(seq_q * num_heads * head_dim) * sizeof(uint16_t);
         NSUInteger outBytes = qBytes;
 
-        // Q and output: small temp buffers (decode ≈ 8 KB)
-        id<MTLBuffer> bufQ   = [ctx->device newBufferWithBytes:q    length:qBytes   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outBytes            options:MTLResourceStorageModeShared];
+        NSUInteger offQ = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufQ   = bind_input (ctx, q,      qBytes,   &offQ);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, outBytes, &offOut, &needCopy);
 
         // K/V: persistent cache buffers — zero copies on Apple Silicon
         id<MTLBuffer> bufK = [cache->key_buffers   objectAtIndex:(NSUInteger)layer];
@@ -1470,33 +1507,23 @@ static int run_attention_f16_with_kvcache(
 
         if (!bufQ || !bufOut || !bufK || !bufV) return -7;
 
-        id<MTLBuffer> bufSeqQ    = [ctx->device newBufferWithBytes:&seq_q           length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSeqKV   = [ctx->device newBufferWithBytes:&seq_kv          length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH      = [ctx->device newBufferWithBytes:&num_heads        length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNKV     = [ctx->device newBufferWithBytes:&num_kv_heads     length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD      = [ctx->device newBufferWithBytes:&head_dim         length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufPosOff  = [ctx->device newBufferWithBytes:&position_offset  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSlide   = [ctx->device newBufferWithBytes:&sliding_window   length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufSeqQ || !bufSeqKV || !bufNH || !bufNKV || !bufHD || !bufPosOff || !bufSlide) return -7;
-
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
         id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQ      offset:0 atIndex:0];
-        [enc setBuffer:bufK      offset:0 atIndex:1];
-        [enc setBuffer:bufV      offset:0 atIndex:2];
-        [enc setBuffer:bufOut    offset:0 atIndex:3];
-        [enc setBuffer:bufSeqQ   offset:0 atIndex:4];
-        [enc setBuffer:bufSeqKV  offset:0 atIndex:5];
-        [enc setBuffer:bufNH     offset:0 atIndex:6];
-        [enc setBuffer:bufNKV    offset:0 atIndex:7];
-        [enc setBuffer:bufHD     offset:0 atIndex:8];
-        [enc setBuffer:bufPosOff offset:0 atIndex:9];
-        [enc setBuffer:bufSlide  offset:0 atIndex:10];
+        [enc setBuffer:bufQ      offset:offQ   atIndex:0];
+        [enc setBuffer:bufK      offset:0      atIndex:1];
+        [enc setBuffer:bufV      offset:0      atIndex:2];
+        [enc setBuffer:bufOut    offset:offOut atIndex:3];
+        [enc setBytes:&seq_q           length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&seq_kv          length:sizeof(int32_t) atIndex:5];
+        [enc setBytes:&num_heads       length:sizeof(int32_t) atIndex:6];
+        [enc setBytes:&num_kv_heads    length:sizeof(int32_t) atIndex:7];
+        [enc setBytes:&head_dim        length:sizeof(int32_t) atIndex:8];
+        [enc setBytes:&position_offset length:sizeof(int32_t) atIndex:9];
+        [enc setBytes:&sliding_window  length:sizeof(int32_t) atIndex:10];
 
         const int TILE_KV = 256;
         NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
@@ -1512,7 +1539,7 @@ static int run_attention_f16_with_kvcache(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOut.contents, outBytes);
+        if (needCopy) memcpy(output, bufOut.contents, outBytes);
         return 0;
     }
 }
@@ -1570,22 +1597,14 @@ static int run_attention_kernel(
         NSUInteger kvBytes     = (NSUInteger)(seq_kv * num_kv_heads * head_dim) * elemSize;
         NSUInteger outputBytes = qBytes;
 
-        id<MTLBuffer> bufQ   = [ctx->device newBufferWithBytes:q      length:qBytes      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufK   = [ctx->device newBufferWithBytes:k      length:kvBytes     options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufV   = [ctx->device newBufferWithBytes:v      length:kvBytes     options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufOut = [ctx->device newBufferWithLength:outputBytes               options:MTLResourceStorageModeShared];
+        NSUInteger offQ = 0, offK = 0, offV = 0, offOut = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufQ   = bind_input (ctx, q,      qBytes,      &offQ);
+        id<MTLBuffer> bufK   = bind_input (ctx, k,      kvBytes,     &offK);
+        id<MTLBuffer> bufV   = bind_input (ctx, v,      kvBytes,     &offV);
+        id<MTLBuffer> bufOut = bind_output(ctx, output, outputBytes, &offOut, &needCopy);
 
-        id<MTLBuffer> bufSeqQ    = [ctx->device newBufferWithBytes:&seq_q           length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSeqKV   = [ctx->device newBufferWithBytes:&seq_kv          length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNH      = [ctx->device newBufferWithBytes:&num_heads       length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufNKV     = [ctx->device newBufferWithBytes:&num_kv_heads    length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufHD      = [ctx->device newBufferWithBytes:&head_dim        length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufPosOff  = [ctx->device newBufferWithBytes:&position_offset length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufSlide   = [ctx->device newBufferWithBytes:&sliding_window  length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-
-        if (!bufQ || !bufK || !bufV || !bufOut ||
-            !bufSeqQ || !bufSeqKV || !bufNH || !bufNKV ||
-            !bufHD || !bufPosOff || !bufSlide) return -7;
+        if (!bufQ || !bufK || !bufV || !bufOut) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1594,17 +1613,17 @@ static int run_attention_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufQ      offset:0 atIndex:0];
-        [enc setBuffer:bufK      offset:0 atIndex:1];
-        [enc setBuffer:bufV      offset:0 atIndex:2];
-        [enc setBuffer:bufOut    offset:0 atIndex:3];
-        [enc setBuffer:bufSeqQ   offset:0 atIndex:4];
-        [enc setBuffer:bufSeqKV  offset:0 atIndex:5];
-        [enc setBuffer:bufNH     offset:0 atIndex:6];
-        [enc setBuffer:bufNKV    offset:0 atIndex:7];
-        [enc setBuffer:bufHD     offset:0 atIndex:8];
-        [enc setBuffer:bufPosOff offset:0 atIndex:9];
-        [enc setBuffer:bufSlide  offset:0 atIndex:10];
+        [enc setBuffer:bufQ      offset:offQ   atIndex:0];
+        [enc setBuffer:bufK      offset:offK   atIndex:1];
+        [enc setBuffer:bufV      offset:offV   atIndex:2];
+        [enc setBuffer:bufOut    offset:offOut atIndex:3];
+        [enc setBytes:&seq_q           length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&seq_kv          length:sizeof(int32_t) atIndex:5];
+        [enc setBytes:&num_heads       length:sizeof(int32_t) atIndex:6];
+        [enc setBytes:&num_kv_heads    length:sizeof(int32_t) atIndex:7];
+        [enc setBytes:&head_dim        length:sizeof(int32_t) atIndex:8];
+        [enc setBytes:&position_offset length:sizeof(int32_t) atIndex:9];
+        [enc setBytes:&sliding_window  length:sizeof(int32_t) atIndex:10];
 
         // Dynamic threadgroup memory:
         //   q_shared(head_dim) + score_tile(256) + out_accum(head_dim) + warp_scratch(8)
@@ -1622,7 +1641,7 @@ static int run_attention_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(output, bufOut.contents, outputBytes);
+        if (needCopy) memcpy(output, bufOut.contents, outputBytes);
         return 0;
     }
 }
@@ -1692,10 +1711,11 @@ static int run_quant_kv_kernel(
             get_or_create_pipeline(ctx, "quant_kv.metal", functionName);
         if (!pipeline) return -3;
 
-        id<MTLBuffer> bufSrc   = [ctx->device newBufferWithBytes:src   length:src_bytes          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufDst   = [ctx->device newBufferWithLength:dst_bytes                      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufTotal = [ctx->device newBufferWithBytes:&total_blocks length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        if (!bufSrc || !bufDst || !bufTotal) return -7;
+        NSUInteger offSrc = 0, offDst = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufSrc = bind_input (ctx, src, src_bytes, &offSrc);
+        id<MTLBuffer> bufDst = bind_output(ctx, dst, dst_bytes, &offDst, &needCopy);
+        if (!bufSrc || !bufDst) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1704,9 +1724,9 @@ static int run_quant_kv_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufSrc   offset:0 atIndex:0];
-        [enc setBuffer:bufDst   offset:0 atIndex:1];
-        [enc setBuffer:bufTotal offset:0 atIndex:2];
+        [enc setBuffer:bufSrc   offset:offSrc atIndex:0];
+        [enc setBuffer:bufDst   offset:offDst atIndex:1];
+        [enc setBytes:&total_blocks length:sizeof(int32_t) atIndex:2];
 
         // One thread per quantization block.
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
@@ -1721,7 +1741,7 @@ static int run_quant_kv_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(dst, bufDst.contents, dst_bytes);
+        if (needCopy) memcpy(dst, bufDst.contents, dst_bytes);
         return 0;
     }
 }
@@ -1778,12 +1798,12 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
         NSUInteger xBytes      = (NSUInteger)k * sizeof(float);
         NSUInteger yBytes      = (NSUInteger)n * sizeof(float);
 
-        id<MTLBuffer> bufW = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufX = [ctx->device newBufferWithBytes:x      length:xBytes      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufY = [ctx->device newBufferWithLength:yBytes                   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufK = [ctx->device newBufferWithBytes:&k length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        if (!bufW || !bufX || !bufY || !bufN || !bufK) return -7;
+        NSUInteger offW = 0, offX = 0, offY = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufW = bind_input (ctx, weight, weightBytes, &offW);
+        id<MTLBuffer> bufX = bind_input (ctx, x,      xBytes,      &offX);
+        id<MTLBuffer> bufY = bind_output(ctx, y,      yBytes,      &offY, &needCopy);
+        if (!bufW || !bufX || !bufY) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1792,11 +1812,11 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufW offset:0 atIndex:0];
-        [enc setBuffer:bufX offset:0 atIndex:1];
-        [enc setBuffer:bufY offset:0 atIndex:2];
-        [enc setBuffer:bufN offset:0 atIndex:3];
-        [enc setBuffer:bufK offset:0 atIndex:4];
+        [enc setBuffer:bufW offset:offW atIndex:0];
+        [enc setBuffer:bufX offset:offX atIndex:1];
+        [enc setBuffer:bufY offset:offY atIndex:2];
+        [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
         // One threadgroup per output row; 256 threads per group.
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
@@ -1808,7 +1828,7 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(y, bufY.contents, yBytes);
+        if (needCopy) memcpy(y, bufY.contents, yBytes);
         return 0;
     }
 }
@@ -1839,12 +1859,12 @@ static int run_gemv_f16_kernel(
         NSUInteger xBytes = (NSUInteger)k * sizeof(uint16_t);
         NSUInteger yBytes = (NSUInteger)n * sizeof(uint16_t);
 
-        id<MTLBuffer> bufW = [ctx->device newBufferWithBytes:weight length:weightBytes options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufX = [ctx->device newBufferWithBytes:x      length:xBytes      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufY = [ctx->device newBufferWithLength:yBytes                   options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufN = [ctx->device newBufferWithBytes:&n length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufK = [ctx->device newBufferWithBytes:&k length:sizeof(int32_t) options:MTLResourceStorageModeShared];
-        if (!bufW || !bufX || !bufY || !bufN || !bufK) return -7;
+        NSUInteger offW = 0, offX = 0, offY = 0;
+        bool needCopyY = false;
+        id<MTLBuffer> bufW = bind_input (ctx, weight, weightBytes, &offW);
+        id<MTLBuffer> bufX = bind_input (ctx, x,      xBytes,      &offX);
+        id<MTLBuffer> bufY = bind_output(ctx, y,      yBytes,      &offY, &needCopyY);
+        if (!bufW || !bufX || !bufY) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1853,11 +1873,12 @@ static int run_gemv_f16_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufW offset:0 atIndex:0];
-        [enc setBuffer:bufX offset:0 atIndex:1];
-        [enc setBuffer:bufY offset:0 atIndex:2];
-        [enc setBuffer:bufN offset:0 atIndex:3];
-        [enc setBuffer:bufK offset:0 atIndex:4];
+        [enc setBuffer:bufW offset:offW atIndex:0];
+        [enc setBuffer:bufX offset:offX atIndex:1];
+        [enc setBuffer:bufY offset:offY atIndex:2];
+        // Small int constants → setBytes (no MTLBuffer allocation).
+        [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
         NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
@@ -1868,7 +1889,7 @@ static int run_gemv_f16_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(y, bufY.contents, yBytes);
+        if (needCopyY) memcpy(y, bufY.contents, yBytes);
         return 0;
     }
 }
@@ -1977,10 +1998,11 @@ static int run_dequant_kernel(
             get_or_create_pipeline(ctx, "dequant.metal", functionName);
         if (!pipeline) return -3;
 
-        id<MTLBuffer> bufSrc   = [ctx->device newBufferWithBytes:src   length:src_bytes          options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufDst   = [ctx->device newBufferWithLength:dst_bytes                      options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufTotal = [ctx->device newBufferWithBytes:&total length:sizeof(int32_t)   options:MTLResourceStorageModeShared];
-        if (!bufSrc || !bufDst || !bufTotal) return -7;
+        NSUInteger offSrc = 0, offDst = 0;
+        bool needCopy = false;
+        id<MTLBuffer> bufSrc = bind_input (ctx, src, src_bytes, &offSrc);
+        id<MTLBuffer> bufDst = bind_output(ctx, dst, dst_bytes, &offDst, &needCopy);
+        if (!bufSrc || !bufDst) return -7;
 
         id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
         if (!cmd) return -8;
@@ -1989,9 +2011,9 @@ static int run_dequant_kernel(
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
-        [enc setBuffer:bufSrc   offset:0 atIndex:0];
-        [enc setBuffer:bufDst   offset:0 atIndex:1];
-        [enc setBuffer:bufTotal offset:0 atIndex:2];
+        [enc setBuffer:bufSrc offset:offSrc atIndex:0];
+        [enc setBuffer:bufDst offset:offDst atIndex:1];
+        [enc setBytes:&total length:sizeof(int32_t) atIndex:2];
 
         [enc dispatchThreadgroups:MTLSizeMake(n_groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -2001,7 +2023,7 @@ static int run_dequant_kernel(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(dst, bufDst.contents, dst_bytes);
+        if (needCopy) memcpy(dst, bufDst.contents, dst_bytes);
         return 0;
     }
 }
@@ -2166,20 +2188,26 @@ static int run_gemm(
         NSUInteger bBytes = bRows * bCols * elemSize;
         NSUInteger cBytes = cRows * cCols * elemSize;
 
-        // Wrap host pointers directly — Apple Silicon unified memory.
-        // For C we use `newBufferWithBytes` (copy in) when beta != 0; otherwise
-        // the kernel overwrites and we still copy out at the end.
-        id<MTLBuffer> bufA = [ctx->device newBufferWithBytes:a length:aBytes
-                                  options:MTLResourceStorageModeShared];
-        id<MTLBuffer> bufB = [ctx->device newBufferWithBytes:b length:bBytes
-                                  options:MTLResourceStorageModeShared];
+        // Zero-copy bind. For C: if beta != 0 the kernel reads C, so we need
+        // copy-in on miss — handled inline.
+        NSUInteger offA = 0, offB = 0, offC = 0;
+        bool needCopyC = false;
+        id<MTLBuffer> bufA = bind_input(ctx, a, aBytes, &offA);
+        id<MTLBuffer> bufB = bind_input(ctx, b, bBytes, &offB);
         id<MTLBuffer> bufC;
         if (beta != 0.0f) {
-            bufC = [ctx->device newBufferWithBytes:c length:cBytes
-                        options:MTLResourceStorageModeShared];
+            // C is read AND written. Reuse on hit; copy-in fallback on miss.
+            NSUInteger offHit = 0;
+            bufC = lookup_shared_buffer(ctx, c, &offHit);
+            if (bufC) {
+                offC = offHit;
+            } else {
+                bufC = [ctx->device newBufferWithBytes:c length:cBytes
+                            options:MTLResourceStorageModeShared];
+                needCopyC = true;
+            }
         } else {
-            bufC = [ctx->device newBufferWithLength:cBytes
-                        options:MTLResourceStorageModeShared];
+            bufC = bind_output(ctx, c, cBytes, &offC, &needCopyC);
         }
         if (!bufA || !bufB || !bufC) return -7;
 
@@ -2199,9 +2227,9 @@ static int run_gemm(
                            rowBytes:cCols * elemSize
                            dataType:dataType];
 
-        MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:bufA descriptor:descA];
-        MPSMatrix* matB = [[MPSMatrix alloc] initWithBuffer:bufB descriptor:descB];
-        MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:bufC descriptor:descC];
+        MPSMatrix* matA = [[MPSMatrix alloc] initWithBuffer:bufA offset:offA descriptor:descA];
+        MPSMatrix* matB = [[MPSMatrix alloc] initWithBuffer:bufB offset:offB descriptor:descB];
+        MPSMatrix* matC = [[MPSMatrix alloc] initWithBuffer:bufC offset:offC descriptor:descC];
 
         MPSMatrixMultiplication* mm = [[MPSMatrixMultiplication alloc]
             initWithDevice:ctx->device
@@ -2227,7 +2255,7 @@ static int run_gemm(
 
         if (cmd.error != nil) return -11;
 
-        memcpy(c, bufC.contents, cBytes);
+        if (needCopyC) memcpy(c, bufC.contents, cBytes);
         return 0;
     }
 }
