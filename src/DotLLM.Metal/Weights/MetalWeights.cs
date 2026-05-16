@@ -122,7 +122,7 @@ public sealed class MetalWeights : IDisposable
             // If anything goes wrong mid-load, free what we've allocated and
             // dispose the gguf. Don't leak.
             foreach (var ptr in owned)
-                FreeFp16(ptr);
+                FreeFp16(ctx, ptr);
             if (registeredMmapBase != 0)
                 MetalNative.UnregisterBuffer(ctx.Handle, registeredMmapBase);
             gguf.Dispose();
@@ -137,7 +137,10 @@ public sealed class MetalWeights : IDisposable
         _disposed = true;
 
         foreach (var ptr in _ownedFp16Buffers)
-            FreeFp16(ptr);
+        {
+            if (ptr != 0)
+                MetalNative.FreeShared(_ctxHandle, ptr);
+        }
 
         // Unregister BEFORE unmapping — once the mmap is gone the MTLBuffer
         // would reference freed virtual memory.
@@ -253,9 +256,4 @@ public sealed class MetalWeights : IDisposable
             : 0;
     }
 
-    private static unsafe void FreeFp16(nint ptr)
-    {
-        if (ptr != 0)
-            NativeMemory.AlignedFree((void*)ptr);
-    }
 }

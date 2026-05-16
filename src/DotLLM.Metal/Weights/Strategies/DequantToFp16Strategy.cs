@@ -103,9 +103,10 @@ public sealed class DequantToFp16Strategy : IWeightLoadStrategy
     }
 
     /// <summary>
-    /// Allocates a 64-byte aligned FP16 buffer (count Half values).
-    /// 64-byte alignment matches AVX-512 / cache-line conventions used elsewhere
-    /// in the project. The caller is responsible for freeing via NativeMemory.AlignedFree.
+    /// Allocates an FP16 buffer as a page-aligned MTLBuffer registered in the
+    /// context's shared-buffer map. Kernels can recover the MTLBuffer by
+    /// pointer for zero-copy encoding (no CPU↔GPU copy at dispatch time).
+    /// Caller must free via <see cref="MetalNative.FreeShared"/>.
     /// </summary>
     private static IntPtr AllocFp16Aligned(MetalContext ctx, int count)
     {
