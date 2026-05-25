@@ -100,8 +100,10 @@ kernel void rmsnorm_f32(
 }
 
 
-// Port of rmsnorm_f16.cu — identical reduction structure to rmsnorm_f32,
-// FP16 I/O with FP32 accumulation throughout.
+// Vectorized RMSNorm (FP16). For n%4 == 0 each thread processes 4 contiguous
+// elements per iteration via half4 loads (4× fewer load/store instructions and
+// 4× wider FMAs). Falls back to scalar when n is not a multiple of 4.
+// Common LLM hidden sizes (3072, 4096, 5120, 8192, ...) all satisfy n%4==0.
 kernel void rmsnorm_f16(
     device const half*  input   [[ buffer(0) ]],   // x  : [seqLen, n]
     device const half*  weight  [[ buffer(1) ]],   // w  : [n]  (RMSNorm scale)
@@ -118,11 +120,21 @@ kernel void rmsnorm_f16(
     const device half* x = input  + (size_t)row * n;
     device       half* y = output + (size_t)row * n;
 
-    // Phase 1: partial sum of squares — FP32 accumulation (half → float on load)
+    // Phase 1: partial sum of squares — half4 path when possible.
     float sum_sq = 0.0f;
-    for (uint i = lid; i < (uint)n; i += tgSize) {
-        float v = float(x[i]);
-        sum_sq += v * v;
+    if ((n & 3) == 0) {
+        float4 acc4 = float4(0.0f);
+        uint nv = (uint)n >> 2;          // number of half4 chunks
+        for (uint i = lid; i < nv; i += tgSize) {
+            float4 v = float4(*(device const half4*)(x + i * 4));
+            acc4 = fma(v, v, acc4);
+        }
+        sum_sq = acc4.x + acc4.y + acc4.z + acc4.w;
+    } else {
+        for (uint i = lid; i < (uint)n; i += tgSize) {
+            float v = float(x[i]);
+            sum_sq += v * v;
+        }
     }
 
     // Phase 2: simd-group reduction
@@ -149,10 +161,19 @@ kernel void rmsnorm_f16(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 6: normalize, scale, write back as half
+    // Phase 6: normalize, scale, write back as half — vectorized when possible.
     float scale = ri;
-    for (uint i = lid; i < (uint)n; i += tgSize) {
-        y[i] = half(float(x[i]) * scale * float(weight[i]));
+    if ((n & 3) == 0) {
+        uint nv = (uint)n >> 2;
+        for (uint i = lid; i < nv; i += tgSize) {
+            float4 xf = float4(*(device const half4*)(x + i * 4));
+            float4 wf = float4(*(device const half4*)(weight + i * 4));
+            *(device half4*)(y + i * 4) = half4(xf * scale * wf);
+        }
+    } else {
+        for (uint i = lid; i < (uint)n; i += tgSize) {
+            y[i] = half(float(x[i]) * scale * float(weight[i]));
+        }
     }
 }
 
@@ -176,11 +197,21 @@ kernel void rmsnorm_f32in_f16out(
     const device float* x = input  + (size_t)row * n;
     device       half*  y = output + (size_t)row * n;
 
-    // Phase 1: partial sum of squares (all FP32, no conversion needed)
+    // Phase 1: partial sum of squares — float4 path when n%4 == 0.
     float sum_sq = 0.0f;
-    for (uint i = lid; i < (uint)n; i += tgSize) {
-        float v = x[i];
-        sum_sq += v * v;
+    if ((n & 3) == 0) {
+        float4 acc4 = float4(0.0f);
+        uint nv = (uint)n >> 2;
+        for (uint i = lid; i < nv; i += tgSize) {
+            float4 v = *(device const float4*)(x + i * 4);
+            acc4 = fma(v, v, acc4);
+        }
+        sum_sq = acc4.x + acc4.y + acc4.z + acc4.w;
+    } else {
+        for (uint i = lid; i < (uint)n; i += tgSize) {
+            float v = x[i];
+            sum_sq += v * v;
+        }
     }
 
     // Phase 2: simd-group reduction
@@ -207,9 +238,18 @@ kernel void rmsnorm_f32in_f16out(
     }
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Phase 6: normalize, scale, truncate to FP16 on write
+    // Phase 6: normalize, scale, truncate to FP16 on write — vectorized.
     float scale = ri;
-    for (uint i = lid; i < (uint)n; i += tgSize) {
-        y[i] = half(x[i] * scale * weight[i]);
+    if ((n & 3) == 0) {
+        uint nv = (uint)n >> 2;
+        for (uint i = lid; i < nv; i += tgSize) {
+            float4 xv = *(device const float4*)(x + i * 4);
+            float4 wv = *(device const float4*)(weight + i * 4);
+            *(device half4*)(y + i * 4) = half4(xv * scale * wv);
+        }
+    } else {
+        for (uint i = lid; i < (uint)n; i += tgSize) {
+            y[i] = half(x[i] * scale * weight[i]);
+        }
     }
 }
