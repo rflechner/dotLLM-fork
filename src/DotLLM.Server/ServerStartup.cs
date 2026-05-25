@@ -149,7 +149,7 @@ public static class ServerStartup
         {
             if (options.UsePaged)
                 Console.WriteLine("[dotllm] Paged KV-cache not supported with Metal, using GPU cache.");
-            kvFactory = (cfg, size) => new MetalKvCache(metalModel.Context, cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, cfg.MaxSequenceLength);
+            kvFactory = (cfg, size) => new MetalKvCache(metalModel.Context, cfg.NumLayers, cfg.NumKvHeads, cfg.HeadDim, size);
         }
         else if (model is DotLLM.Cuda.HybridTransformerModel hybridModel)
         {
