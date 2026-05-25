@@ -20,19 +20,28 @@ kernel void fused_add_rmsnorm_f16(
     device half* out_row = output + (size_t)row * n;
     
     // Pass 1: compute sum in FP32, write sum back to residual (FP16),
-    // and accumulate sum-of-squares for RMS
+    // and accumulate sum-of-squares for RMS — vectorized when n % 4 == 0.
     float sum_sq = 0.0f;
-    for (int i = threadIdx_x; i < n; i += blockDim_x)
-    {
-        float r = float(res_row[i]);
-        float xi = float(x_row[i]);
-        float sum = r + xi;
-
-        // Update residual with the sum (FP16 storage)
-        res_row[i] = half(sum);
-
-        // Accumulate for RMS from the FP32 sum (no extra truncation!)
-        sum_sq += sum * sum;
+    if ((n & 3) == 0) {
+        float4 acc4 = float4(0.0f);
+        uint nv = (uint)n >> 2;
+        for (uint i = (uint)threadIdx_x; i < nv; i += (uint)blockDim_x) {
+            float4 r = float4(*(device const half4*)(res_row + i * 4));
+            float4 xv = float4(*(device const half4*)(x_row   + i * 4));
+            float4 s = r + xv;
+            *(device half4*)(res_row + i * 4) = half4(s);
+            acc4 = fma(s, s, acc4);
+        }
+        sum_sq = acc4.x + acc4.y + acc4.z + acc4.w;
+    } else {
+        for (int i = threadIdx_x; i < n; i += blockDim_x)
+        {
+            float r = float(res_row[i]);
+            float xi = float(x_row[i]);
+            float sum = r + xi;
+            res_row[i] = half(sum);
+            sum_sq += sum * sum;
+        }
     }
 
     // Warp reduction for sum_sq
@@ -59,14 +68,22 @@ kernel void fused_add_rmsnorm_f16(
         rms_inv = rsqrt(sum_sq / (float)n + eps);
     threadgroup_barrier(mem_flags::mem_threadgroup);
 
-    // Pass 2: normalize — read from residual (which now has the sum in FP16)
-    // Note: we read back from FP16, so there IS one truncation. But the RMS
-    // was computed from the FP32 sum, which is the key improvement.
-    for (int i = threadIdx_x; i < n; i += blockDim_x)
-    {
-        float v = float(res_row[i]);
-        float w = float(weight[i]);
-        out_row[i] = half(v * rms_inv * w);
+    // Pass 2: normalize — read from residual (which now has the sum in FP16).
+    // Vectorized when n % 4 == 0.
+    if ((n & 3) == 0) {
+        uint nv = (uint)n >> 2;
+        for (uint i = (uint)threadIdx_x; i < nv; i += (uint)blockDim_x) {
+            float4 v = float4(*(device const half4*)(res_row + i * 4));
+            float4 w = float4(*(device const half4*)(weight  + i * 4));
+            *(device half4*)(out_row + i * 4) = half4(v * rms_inv * w);
+        }
+    } else {
+        for (int i = threadIdx_x; i < n; i += blockDim_x)
+        {
+            float v = float(res_row[i]);
+            float w = float(weight[i]);
+            out_row[i] = half(v * rms_inv * w);
+        }
     }
 }
 

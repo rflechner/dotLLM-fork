@@ -139,63 +139,42 @@ kernel void quantized_gemv_q4_k(
     device const uchar* w_row = weight + (ulong)row * sbpr * 144;
     float acc = 0.0f;
 
-    for (int sb = (int)tid; sb < sbpr; sb += (int)tgw)
+    // Parallelize across individual coefficients instead of assigning only one
+    // thread per 256-value superblock. For common decode shapes such as k=4096,
+    // sbpr is only 16, so the old loop used only 16 useful threads out of a
+    // 256-thread group. This keeps the same one-threadgroup-per-output-row model,
+    // but all lanes now contribute to the dot product.
+    for (int idx = (int)tid; idx < k; idx += (int)tgw)
     {
+        int sb       = idx >> 8;       // idx / 256
+        int in_sb    = idx & 255;      // idx % 256
+        int sub      = in_sb >> 5;     // 8 sub-blocks of 32 values
+        int i        = in_sb & 31;     // element inside the 32-value sub-block
+        int pair     = sub >> 1;       // two sub-blocks share one 32-byte qs stream
+
         device const uchar* block      = w_row + sb * 144;
         float               d          = float(*(device const half*)(block));
         float               dmin       = float(*(device const half*)(block + 2));
         device const uchar* scales_raw = block + 4;
         device const uchar* qs         = block + 16;
 
-        // 4 pairs of sub-blocks, each pair shares 32 qs bytes
-        for (int pair = 0; pair < 4; pair++)
+        int sc, m;
+        if (sub < 4)
         {
-            int sb_even = pair * 2;
-            int sb_odd  = pair * 2 + 1;
-
-            int sc0, m0, sc1, m1;
-            if (sb_even < 4)
-            {
-                sc0 = (int)(scales_raw[sb_even]     & 0x3Fu);
-                m0  = (int)(scales_raw[sb_even + 4] & 0x3Fu);
-                sc1 = (int)(scales_raw[sb_odd]      & 0x3Fu);
-                m1  = (int)(scales_raw[sb_odd  + 4] & 0x3Fu);
-            }
-            else
-            {
-                sc0 = (int)((scales_raw[sb_even + 4] & 0x0Fu) | ((scales_raw[sb_even - 4] >> 6) << 4));
-                m0  = (int)((scales_raw[sb_even + 4] >> 4)    | ((scales_raw[sb_even]     >> 6) << 4));
-                sc1 = (int)((scales_raw[sb_odd  + 4] & 0x0Fu) | ((scales_raw[sb_odd  - 4] >> 6) << 4));
-                m1  = (int)((scales_raw[sb_odd  + 4] >> 4)    | ((scales_raw[sb_odd]      >> 6) << 4));
-            }
-
-            float scale0 = d * float(sc0);
-            float min0   = dmin * float(m0);
-            float scale1 = d * float(sc1);
-            float min1   = dmin * float(m1);
-
-            device const uchar* pair_qs   = qs + pair * 32;
-            int                 base_x    = sb * 256 + pair * 64;
-
-            // Vectorized inner loop: 8 batches of 4 quants each.
-            // - pair_qs is at `qs + pair*32`. qs = block + 16, block is 144-aligned
-            //   only at row boundaries → use packed_uchar4 (alignment 1).
-            // - x base_x = sb*256 + pair*64 → multiple of 64 → 64-byte aligned
-            //   (half4 alignment requires 8 → easily satisfied).
-            for (int j = 0; j < 32; j += 4)
-            {
-                uchar4 bv4 = uchar4(*(device const packed_uchar4*)(pair_qs + j));
-                float4 xe = float4(*(device const half4*)(x + base_x + j));
-                float4 xo = float4(*(device const half4*)(x + base_x + j + 32));
-
-                // Low nibble = even sub-block, high nibble = odd sub-block.
-                float4 lo = float4(bv4 & uchar4(0x0F));
-                float4 hi = float4(bv4 >> 4);
-
-                acc += dot(scale0 * lo - float4(min0), xe);
-                acc += dot(scale1 * hi - float4(min1), xo);
-            }
+            sc = (int)(scales_raw[sub]     & 0x3Fu);
+            m  = (int)(scales_raw[sub + 4] & 0x3Fu);
         }
+        else
+        {
+            sc = (int)((scales_raw[sub + 4] & 0x0Fu) | ((scales_raw[sub - 4] >> 6) << 4));
+            m  = (int)((scales_raw[sub + 4] >> 4)    | ((scales_raw[sub]     >> 6) << 4));
+        }
+
+        uchar packed = qs[pair * 32 + i];
+        int q = ((sub & 1) == 0) ? (int)(packed & 0x0Fu)
+                                 : (int)(packed >> 4);
+
+        acc += (d * float(sc) * float(q) - dmin * float(m)) * float(x[idx]);
     }
 
     threadgroup float ws[32];
