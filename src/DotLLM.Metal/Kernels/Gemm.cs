@@ -25,6 +25,14 @@ namespace DotLLM.Metal.Kernels;
 /// </remarks>
 public static class Gemm
 {
+    // Runtime kill-switch for the simdgroup_matrix kernel. Set the env var
+    //   DOTLLM_DISABLE_GEMM_SMM=1
+    // to force every FP16 GEMM through MPS, regardless of mode eligibility.
+    // Read once at type-init; toggling the env var mid-process has no effect.
+    private static readonly bool s_smmDisabled =
+        Environment.GetEnvironmentVariable("DOTLLM_DISABLE_GEMM_SMM") == "1";
+
+
     /// <summary>FP16 GEMM. Buffers reinterpret <see cref="Half"/> as <c>ushort</c>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void ExecuteF16(
@@ -63,6 +71,16 @@ public static class Gemm
 
     /// <summary>
     /// Forward-pass overload: takes raw <see cref="nint"/> pointers and does not check buffer lengths.
+    /// <para>
+    /// Fast path: when the call matches the LLM-projection mode supported by
+    /// the custom simdgroup_matrix kernel (no transpose-A, transpose-B,
+    /// alpha=1, beta=0), the request is routed through <c>gemm_f16_smm</c>,
+    /// which handles arbitrary M, N, K via per-element boundary masking.
+    /// Other modes (transpose-A, alpha/beta ≠ identity) fall back to the
+    /// MPS-backed <c>gemm_f16</c>. The routing decision is cheap (a few
+    /// integer comparisons) and silent — callers see identical numerics within
+    /// FP16 tolerance.
+    /// </para>
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static unsafe void ExecuteF16(
@@ -78,12 +96,73 @@ public static class Gemm
         float alpha = 1.0f,
         float beta = 0.0f)
     {
+        bool smmEligible =
+            !s_smmDisabled &&
+            !transposeA && transposeB &&
+            alpha == 1.0f && beta == 0.0f;
+
+        if (smmEligible)
+        {
+            int smmCode = MetalNative.GemmF16Smm(
+                ctx.Handle, (ushort*)a, (ushort*)b, (ushort*)c, m, n, k,
+                transposeA: 0, transposeB: 1, alpha: 1.0f, beta: 0.0f);
+            if (smmCode == 0) return;
+            // -1 means the kernel itself rejected the mode (defensive — we
+            // already validated above). Anything else is a hard error.
+            if (smmCode != -1)
+                throw new InvalidOperationException($"Metal gemm_f16_smm failed with code {smmCode}.");
+            // smmCode == -1 → fall through to MPS.
+        }
+
         int code = MetalNative.GemmF16(
             ctx.Handle, (ushort*)a, (ushort*)b, (ushort*)c, m, n, k,
             transposeA ? 1 : 0, transposeB ? 1 : 0, alpha, beta);
         if (code != 0)
         {
             throw new InvalidOperationException($"Metal gemm_f16 failed with code {code}.");
+        }
+    }
+
+    /// <summary>
+    /// FP16 GEMM via custom simdgroup_matrix kernel.
+    /// <para>
+    /// Supports only the LLM-projection mode: <c>transposeA = false</c>,
+    /// <c>transposeB = true</c>, <c>alpha = 1</c>, <c>beta = 0</c>. Any
+    /// <c>m, n, k ≥ 1</c> are accepted — boundary tiles are handled inside
+    /// the kernel (32×32 output tile, partial edges are masked). Best
+    /// efficiency when <c>m</c> and <c>n</c> are multiples of 32 and <c>k</c>
+    /// is a multiple of 8. Returns the same numerical result as the MPS-backed
+    /// FP16 overload within FP16 tolerance (FP32 accumulation inside).
+    /// </para>
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static void ExecuteF16Smm(
+        MetalContext       ctx,
+        ReadOnlySpan<Half> a,
+        ReadOnlySpan<Half> b,
+        Span<Half>         c,
+        int                m,
+        int                n,
+        int                k)
+    {
+        Validate(a.Length, b.Length, c.Length, m, n, k, transposeA: false, transposeB: true);
+
+        var aU = MemoryMarshal.Cast<Half, ushort>(a);
+        var bU = MemoryMarshal.Cast<Half, ushort>(b);
+        var cU = MemoryMarshal.Cast<Half, ushort>(c);
+
+        unsafe
+        {
+            fixed (ushort* pA = aU)
+            fixed (ushort* pB = bU)
+            fixed (ushort* pC = cU)
+            {
+                int code = MetalNative.GemmF16Smm(
+                    ctx.Handle, pA, pB, pC, m, n, k,
+                    transposeA: 0, transposeB: 1, alpha: 1.0f, beta: 0.0f);
+                if (code != 0)
+                    throw new InvalidOperationException($"Metal gemm_f16_smm failed with code {code}.");
+            }
         }
     }
 
