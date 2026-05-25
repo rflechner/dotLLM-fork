@@ -377,6 +377,33 @@ static inline bool should_copy_back(const dotllm_kernel_scope* s)
     return !s->batched;
 }
 
+// Pick a threadgroup size adapted to:
+//   (a) the simd width of the device (round up to a full warp — never split one),
+//   (b) the amount of work the threadgroup actually has (no point spawning 256
+//       threads when only 128 blocks need processing),
+//   (c) the kernel's per-pipeline cap (registers/smem may reduce maxTg below
+//       1024), and
+//   (d) the caller's `cap` — how large the caller is willing to go.
+// Callers choose `cap` per kernel: memory-bound elementwise usually 256
+// (preserves existing behavior), reduction kernels 512, GEMV 256 (helper will
+// auto-shrink when the row has fewer blocks than 256).
+static inline NSUInteger pick_tgw(
+    id<MTLComputePipelineState> pipeline,
+    NSUInteger work_per_group,
+    NSUInteger cap)
+{
+    NSUInteger maxTg = pipeline.maxTotalThreadsPerThreadgroup;
+    NSUInteger warp  = pipeline.threadExecutionWidth;
+    if (warp == 0) warp = 32;
+
+    NSUInteger limit = MIN(cap, maxTg);
+    NSUInteger ideal = ((work_per_group + warp - 1) / warp) * warp;
+    NSUInteger tgw   = MIN(ideal, limit);
+    if (tgw < warp) tgw = MIN(warp, limit);
+    if (tgw == 0) tgw = 1;
+    return tgw;
+}
+
 // ── Zero-copy bind helpers (Phase 2) ─────────────────────────────────────────
 //
 // `bind_input`  : resolves a host pointer to an MTLBuffer the kernel can read.
@@ -512,9 +539,7 @@ static int run_binary_f32_kernel(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -557,9 +582,7 @@ static int run_unary_f32_kernel(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -615,9 +638,7 @@ extern "C" int dotllm_metal_add_f16(
 
         // Dispatch n/2 threads (vectorized half2); +1 handles the odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -662,9 +683,7 @@ extern "C" int dotllm_metal_add_f32_f16(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -785,9 +804,7 @@ extern "C" int dotllm_metal_swiglu_f16(
 
         // Dispatch length/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -844,9 +861,7 @@ extern "C" int dotllm_metal_bias_add_f32(
         [enc setBytes:&dim     length:sizeof(uint32_t) atIndex:2];
         [enc setBytes:&seq_len length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (total > 0 && tgw > total) tgw = total;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)total, 256);
 
         [enc dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -902,9 +917,7 @@ extern "C" int dotllm_metal_bias_add_f16(
 
         // Dispatch total/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (total / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -967,9 +980,7 @@ extern "C" int dotllm_metal_rope_f32(
         [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
         [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch_len, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -1031,9 +1042,7 @@ extern "C" int dotllm_metal_rope_f16(
         [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
         [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch_len, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -1059,10 +1068,12 @@ extern "C" int dotllm_metal_rmsnorm_f32(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32");
         if (!pipeline) return -3;
 
-        // Threadgroup size: up to 256 threads per row.
-        // This kernel uses dispatchThreadgroups (not dispatchThreads) because
-        // the unit of work here is a whole group, not a single thread.
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Threadgroup size: scaled to hidden dim. The kernel is reduction-heavy
+        // (mean of squares over n elements) so we prefer 512 threads per group
+        // when n is large enough, falling back to the simd width for tiny rows.
+        // `pick_tgw` honors the pipeline cap and rounds to a multiple of warp.
+        // The kernel's `simd_sums[32]` scratch is sized for up to 1024 threads.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
@@ -1115,7 +1126,8 @@ extern "C" int dotllm_metal_rmsnorm_f16(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // See rmsnorm_f32: 512 preferred, capped by the pipeline.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(uint16_t);
@@ -1186,8 +1198,7 @@ static int run_convert_kernel(
         [enc setBuffer:bufDst offset:offDst atIndex:1];
         [enc setBytes:&n length:sizeof(int32_t) atIndex:2];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if ((NSUInteger)n < tgw) tgw = (NSUInteger)n;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)n, 256);
 
         [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -1214,7 +1225,9 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
             get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f32");
         if (!pipeline) return -3;
 
-        uint32_t tgSize   = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Per-head reduction: work per group = head_dim (typically 64-128).
+        // Cap at 128 so we don't waste threads on tiny rows.
+        uint32_t tgSize   = (uint32_t)pick_tgw(pipeline, (NSUInteger)head_dim, 128);
         uint32_t nGroups  = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
 
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(float);
@@ -1264,7 +1277,8 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
             get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize  = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // See per_head_rmsnorm_f32: cap 128 for head_dim-sized reductions.
+        uint32_t tgSize  = (uint32_t)pick_tgw(pipeline, (NSUInteger)head_dim, 128);
         uint32_t nGroups = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
 
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(uint16_t);
@@ -1312,7 +1326,8 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32in_f16out");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Reduction over hidden dim; allow up to 512 threads for better occupancy.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
         NSUInteger outputBytes = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
@@ -1364,7 +1379,8 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
             get_or_create_pipeline(ctx, "fused_add_rmsnorm.metal", "fused_add_rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Reduction over hidden dim; cap at 512.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger rowBytes    = (NSUInteger)n * sizeof(uint16_t);
         NSUInteger totalBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
@@ -1434,7 +1450,8 @@ static int run_embedding_kernel(
             get_or_create_pipeline(ctx, "embedding_f32out.metal", functionName);
         if (!pipeline) return -3;
 
-        uint32_t tgSize     = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // One threadgroup per token; threads copy/dequantize hidden_size elements.
+        uint32_t tgSize     = (uint32_t)pick_tgw(pipeline, (NSUInteger)hidden_size, 256);
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
         NSUInteger outBytes = (NSUInteger)(seq_len * hidden_size) * out_elem_bytes;
 
@@ -1638,7 +1655,10 @@ static int run_attention_f16_with_kvcache(
         NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
         [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
 
-        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Attention: each threadgroup processes head_dim work for its (token, head)
+        // pair, iterating over the KV cache in TILE_KV chunks. Cap 256 keeps smem
+        // small and matches the TILE_KV=256 tile size.
+        NSUInteger tgw     = pick_tgw(pipeline, (NSUInteger)head_dim, 256);
         NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -1736,7 +1756,10 @@ static int run_attention_kernel(
         NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
         [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
 
-        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Attention: each threadgroup processes head_dim work for its (token, head)
+        // pair, iterating over the KV cache in TILE_KV chunks. Cap 256 keeps smem
+        // small and matches the TILE_KV=256 tile size.
+        NSUInteger tgw     = pick_tgw(pipeline, (NSUInteger)head_dim, 256);
         NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -1830,9 +1853,7 @@ static int run_quant_kv_kernel(
         [enc setBytes:&total_blocks length:sizeof(int32_t) atIndex:2];
 
         // One thread per quantization block.
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if ((NSUInteger)total_blocks < tgw) tgw = (NSUInteger)total_blocks;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)total_blocks, 256);
 
         [enc dispatchThreads:MTLSizeMake(total_blocks, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
@@ -1915,8 +1936,9 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
         [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
         [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
-        // One threadgroup per output row; 256 threads per group.
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // One threadgroup per output row; each thread strides over Q8_0 blocks
+        // (bpr = k/32). pick_tgw shrinks tgw when bpr < 256 (no idle threads).
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)bpr, 256);
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
@@ -1973,7 +1995,11 @@ static int run_gemv_f16_kernel(
         [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
         [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Generic FP16 GEMV: 5 quant formats supported. bpr is k/32 for
+        // Q8_0/Q4_0/Q5_0 and k/256 for K-quants. We use k/32 as an upper bound
+        // (no underutilization for K-quants when k is large; harmless overshoot
+        // for tiny k since pick_tgw rounds to warp).
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)k / 32, 256);
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
         int rc = finish_kernel(&ks);
