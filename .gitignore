@@ -431,3 +431,5 @@ tests/.models/
 *.metallib
 
 *.xcuserstate
+
+.idea/.idea.dotLLM/.idea/
