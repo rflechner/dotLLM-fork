@@ -7,7 +7,6 @@
 #include <unistd.h>     // getpagesize
 #include "dotllm_core.h"
 #include "dotllm_metal.h"
-#include "metal_kv_cache.mm"
 
 // Internal record for a memory region registered via dotllm_metal_register_buffer.
 // Holds the MTLBuffer with a strong reference so ARC retains it for the
@@ -19,6 +18,11 @@
 @end
 @implementation DotLLMRegion
 @end
+
+// Now that DotLLMRegion is defined, pull in the KV cache implementation
+// (it pushes regions for each layer's K/V buffer so range-lookup resolves
+// writes at arbitrary token offsets).
+#include "metal_kv_cache.mm"
 
 // Name of the pre-compiled archive produced by build.sh. Must sit next to
 // libdotllmmetal.dylib in the deployment layout. Defined in one place so
@@ -99,7 +103,18 @@ extern "C" void* dotllm_metal_alloc_shared(dotllm_metal_context* ctx, size_t byt
     void* ptr = [buf contents];
     if (!ptr) return nullptr;
 
+    // Register the buffer in BOTH maps:
+    //   - shared_buffers: fast O(1) exact-match for callers that pass the base pointer
+    //   - regions:        range lookup for callers that pass base + offset
+    //                     (e.g. reading the last token of HiddenState in prefill).
     [ctx->shared_buffers setObject:buf forKey:[NSValue valueWithPointer:ptr]];
+
+    DotLLMRegion* region = [DotLLMRegion new];
+    region.base   = ptr;
+    region.length = (size_t)bytes;
+    region.buffer = buf;
+    [ctx->regions addObject:region];
+
     return ptr;
 }
 
@@ -107,7 +122,12 @@ extern "C" void dotllm_metal_free_shared(dotllm_metal_context* ctx, void* ptr)
 {
     if (!ctx || !ptr) return;
     [ctx->shared_buffers removeObjectForKey:[NSValue valueWithPointer:ptr]];
-    // ARC releases the MTLBuffer when removed.
+    // Drop the matching region too (linear scan — regions count is small).
+    NSUInteger idx = [ctx->regions indexOfObjectPassingTest:
+        ^BOOL(DotLLMRegion* r, NSUInteger, BOOL*) { return r.base == ptr; }];
+    if (idx != NSNotFound)
+        [ctx->regions removeObjectAtIndex:idx];
+    // ARC releases the MTLBuffer when removed from both collections.
 }
 
 // ── Zero-copy registration of caller-owned memory (e.g. GGUF mmap) ───────────
@@ -194,6 +214,194 @@ static id<MTLBuffer> lookup_shared_buffer(
         }
     }
     return nil;
+}
+
+// ── Command-buffer batching (Phase 2b) ───────────────────────────────────────
+//
+// Opens a long-lived command buffer + compute encoder on the context. While
+// active, all run_* helpers skip their per-kernel commit/waitUntilCompleted
+// and encode their dispatch into the existing encoder. The caller MUST pair
+// every begin_forward with an end_forward in the same thread — otherwise the
+// encoder leaks and the next forward will assert.
+//
+// Returns 0 on success, negative on error.
+
+extern "C" int dotllm_metal_begin_forward(dotllm_metal_context* ctx)
+{
+    if (!ctx) return -10;
+    if (ctx->active_enc != nil || ctx->active_cmd != nil) {
+        NSLog(@"dotllm_metal_begin_forward: a forward is already in flight");
+        return -2;
+    }
+    id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+    if (!cmd) return -8;
+    id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+    if (!enc) return -9;
+    ctx->active_cmd = cmd;
+    ctx->active_enc = enc;
+    return 0;
+}
+
+// Closes the active encoder, commits the command buffer, and BLOCKS until the
+// GPU finishes. After this call the host can safely read any shared buffer
+// the kernels wrote to.
+extern "C" int dotllm_metal_end_forward(dotllm_metal_context* ctx)
+{
+    if (!ctx) return -10;
+    if (ctx->active_enc == nil || ctx->active_cmd == nil) {
+        NSLog(@"dotllm_metal_end_forward: no forward in flight");
+        return -2;
+    }
+    [ctx->active_enc endEncoding];
+    [ctx->active_cmd commit];
+    [ctx->active_cmd waitUntilCompleted];
+    int rc = (ctx->active_cmd.error != nil) ? -11 : 0;
+    ctx->active_enc = nil;
+    ctx->active_cmd = nil;
+    return rc;
+}
+
+// ── GPU buffer-to-buffer copy (Phase 2c — full-forward batching) ─────────────
+//
+// Encodes a copy from `src` to `dst` (both must be GPU-visible — found in
+// shared_buffers or registered regions). In batched mode, the copy is enqueued
+// as a blit in the active command buffer; subsequent compute dispatches see
+// the result without any CPU sync. In standalone mode, the call opens a
+// one-shot blit command buffer and waits — equivalent semantically to memcpy.
+//
+// Returns 0 on success, negative on failure.
+
+extern "C" int dotllm_metal_buffer_copy(
+    dotllm_metal_context* ctx, void* dst, const void* src, size_t bytes)
+{
+    if (!ctx || !dst || !src || bytes == 0) return -10;
+
+    NSUInteger srcOff = 0, dstOff = 0;
+    id<MTLBuffer> srcBuf = lookup_shared_buffer(ctx, src, &srcOff);
+    id<MTLBuffer> dstBuf = lookup_shared_buffer(ctx, dst, &dstOff);
+
+    if (!srcBuf || !dstBuf) {
+        // Pointers aren't registered. In standalone mode we can fall back to
+        // a plain CPU memcpy (both are presumed to be in host RAM). In batched
+        // mode this is a programmer error: the source might not be up-to-date
+        // yet (kernel encoded but not executed).
+        if (ctx->active_enc != nil) {
+            NSLog(@"dotllm_metal_buffer_copy: pointer not registered "
+                  @"during batched forward (src=%p dst=%p)", src, dst);
+            return -2;
+        }
+        memcpy(dst, src, bytes);
+        return 0;
+    }
+
+    if (ctx->active_enc != nil) {
+        // Batched mode: pause the compute encoder, run a blit, resume compute.
+        [ctx->active_enc endEncoding];
+        ctx->active_enc = nil;
+
+        id<MTLBlitCommandEncoder> blit = [ctx->active_cmd blitCommandEncoder];
+        if (!blit) return -9;
+        [blit copyFromBuffer:srcBuf sourceOffset:srcOff
+                    toBuffer:dstBuf destinationOffset:dstOff
+                        size:(NSUInteger)bytes];
+        [blit endEncoding];
+
+        ctx->active_enc = [ctx->active_cmd computeCommandEncoder];
+        if (!ctx->active_enc) return -9;
+        return 0;
+    }
+
+    // Standalone: one-shot command buffer.
+    id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
+    if (!cmd) return -8;
+    id<MTLBlitCommandEncoder> blit = [cmd blitCommandEncoder];
+    if (!blit) return -9;
+    [blit copyFromBuffer:srcBuf sourceOffset:srcOff
+                toBuffer:dstBuf destinationOffset:dstOff
+                    size:(NSUInteger)bytes];
+    [blit endEncoding];
+    [cmd commit];
+    [cmd waitUntilCompleted];
+    return (cmd.error != nil) ? -11 : 0;
+}
+
+// ── Encoder lifecycle helpers (Phase 2b) ─────────────────────────────────────
+//
+// Most run_* helpers follow the same skeleton:
+//   1. obtain a compute encoder (either the batched one or a fresh standalone)
+//   2. configure pipeline / setBuffer / setBytes / dispatch
+//   3. either commit+wait+copyback (standalone) or just leave the dispatch
+//      encoded (batched — end_forward will commit later)
+//
+// We capture the standalone/batched choice in a tiny struct so each kernel
+// only needs two extra lines: begin_kernel(...) and finish_kernel(...).
+
+typedef struct {
+    id<MTLCommandBuffer>          cmd;   // nil in batched mode
+    id<MTLComputeCommandEncoder>  enc;
+    bool                          batched;
+} dotllm_kernel_scope;
+
+static inline dotllm_kernel_scope begin_kernel(dotllm_metal_context* ctx)
+{
+    dotllm_kernel_scope s;
+    if (ctx->active_enc != nil) {
+        s.cmd     = nil;
+        s.enc     = ctx->active_enc;
+        s.batched = true;
+    } else {
+        s.cmd     = [ctx->queue commandBuffer];
+        s.enc     = (s.cmd != nil) ? [s.cmd computeCommandEncoder] : nil;
+        s.batched = false;
+    }
+    return s;
+}
+
+// In standalone mode: endEncoding, commit, wait, return non-zero on error.
+// In batched mode: no-op (the active encoder stays open for the next kernel).
+// Returns 0 on success.
+static inline int finish_kernel(const dotllm_kernel_scope* s)
+{
+    if (s->batched) return 0;
+    [s->enc endEncoding];
+    [s->cmd commit];
+    [s->cmd waitUntilCompleted];
+    return (s->cmd.error != nil) ? -11 : 0;
+}
+
+// True when the kernel ran standalone and its `needCopy` memcpy should fire.
+// In batched mode the memcpy is unsafe (GPU hasn't run yet); callers must
+// guarantee zero-copy hits for outputs when the encoder is active.
+static inline bool should_copy_back(const dotllm_kernel_scope* s)
+{
+    return !s->batched;
+}
+
+// Pick a threadgroup size adapted to:
+//   (a) the simd width of the device (round up to a full warp — never split one),
+//   (b) the amount of work the threadgroup actually has (no point spawning 256
+//       threads when only 128 blocks need processing),
+//   (c) the kernel's per-pipeline cap (registers/smem may reduce maxTg below
+//       1024), and
+//   (d) the caller's `cap` — how large the caller is willing to go.
+// Callers choose `cap` per kernel: memory-bound elementwise usually 256
+// (preserves existing behavior), reduction kernels 512, GEMV 256 (helper will
+// auto-shrink when the row has fewer blocks than 256).
+static inline NSUInteger pick_tgw(
+    id<MTLComputePipelineState> pipeline,
+    NSUInteger work_per_group,
+    NSUInteger cap)
+{
+    NSUInteger maxTg = pipeline.maxTotalThreadsPerThreadgroup;
+    NSUInteger warp  = pipeline.threadExecutionWidth;
+    if (warp == 0) warp = 32;
+
+    NSUInteger limit = MIN(cap, maxTg);
+    NSUInteger ideal = ((work_per_group + warp - 1) / warp) * warp;
+    NSUInteger tgw   = MIN(ideal, limit);
+    if (tgw < warp) tgw = MIN(warp, limit);
+    if (tgw == 0) tgw = 1;
+    return tgw;
 }
 
 // ── Zero-copy bind helpers (Phase 2) ─────────────────────────────────────────
@@ -320,10 +528,9 @@ static int run_binary_f32_kernel(
         id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
         if (!bufA || !bufB || !bufR) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -332,18 +539,13 @@ static int run_binary_f32_kernel(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyR) memcpy(result, bufR.contents, bytes);
+        if (needCopyR && should_copy_back(&ks)) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -370,10 +572,9 @@ static int run_unary_f32_kernel(
         id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
         if (!bufA || !bufR) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -381,18 +582,13 @@ static int run_unary_f32_kernel(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyR) memcpy(result, bufR.contents, bytes);
+        if (needCopyR && should_copy_back(&ks)) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -429,10 +625,9 @@ extern "C" int dotllm_metal_add_f16(
         id<MTLBuffer> bufR = bind_output(ctx, result, bytes, &offR, &needCopyR);
         if (!bufA || !bufB || !bufR) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -443,18 +638,13 @@ extern "C" int dotllm_metal_add_f16(
 
         // Dispatch n/2 threads (vectorized half2); +1 handles the odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyR) memcpy(result, bufR.contents, bytes);
+        if (needCopyR && should_copy_back(&ks)) memcpy(result, bufR.contents, bytes);
         return 0;
     }
 }
@@ -482,10 +672,9 @@ extern "C" int dotllm_metal_add_f32_f16(
         id<MTLBuffer> bufR = bind_output(ctx, result, bytesF32, &offR, &needCopyR);
         if (!bufA || !bufB || !bufR) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -494,18 +683,13 @@ extern "C" int dotllm_metal_add_f32_f16(
         [enc setBuffer:bufR offset:offR atIndex:2];
         [enc setBytes:&length length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (length > 0 && tgw > length) tgw = length;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)length, 256);
 
         [enc dispatchThreads:MTLSizeMake(length, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyR) memcpy(result, bufR.contents, bytesF32);
+        if (needCopyR && should_copy_back(&ks)) memcpy(result, bufR.contents, bytesF32);
         return 0;
     }
 }
@@ -544,10 +728,9 @@ extern "C" int dotllm_metal_softmax_f16(
         id<MTLBuffer> bufOutput = bind_output(ctx, output, outputBytes, &offOut, &needCopy);
         if (!bufInput || !bufOutput) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -559,13 +742,10 @@ extern "C" int dotllm_metal_softmax_f16(
         // One threadgroup per row, 256 threads per threadgroup
         [enc dispatchThreadgroups:MTLSizeMake((NSUInteger)rows, 1, 1)
            threadsPerThreadgroup:MTLSizeMake(256, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -611,10 +791,9 @@ extern "C" int dotllm_metal_swiglu_f16(
         id<MTLBuffer> bufResult = bind_output(ctx, result, bytes, &offR, &needCopyR);
         if (!bufGate || !bufUp || !bufResult) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -625,18 +804,13 @@ extern "C" int dotllm_metal_swiglu_f16(
 
         // Dispatch length/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (length / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyR) memcpy(result, bufResult.contents, bytes);
+        if (needCopyR && should_copy_back(&ks)) memcpy(result, bufResult.contents, bytes);
         return 0;
     }
 }
@@ -676,10 +850,9 @@ extern "C" int dotllm_metal_bias_add_f32(
         id<MTLBuffer> bufBias = bind_input(ctx, bias, biasBytes, &offBias);
         if (!bufOutput || !bufBias) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -688,18 +861,13 @@ extern "C" int dotllm_metal_bias_add_f32(
         [enc setBytes:&dim     length:sizeof(uint32_t) atIndex:2];
         [enc setBytes:&seq_len length:sizeof(uint32_t) atIndex:3];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (total > 0 && tgw > total) tgw = total;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)total, 256);
 
         [enc dispatchThreads:MTLSizeMake(total, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -736,10 +904,9 @@ extern "C" int dotllm_metal_bias_add_f16(
         id<MTLBuffer> bufBias = bind_input(ctx, bias, biasBytes, &offBias);
         if (!bufOutput || !bufBias) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -750,18 +917,13 @@ extern "C" int dotllm_metal_bias_add_f16(
 
         // Dispatch total/2 + 1 threads — vectorized half2 path + odd-tail guard
         uint32_t dispatch = (total / 2u) + 1u;
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256u);
-        if (dispatch > 0 && tgw > dispatch) tgw = dispatch;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOutput.contents, outputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOutput.contents, outputBytes);
         return 0;
     }
 }
@@ -801,10 +963,9 @@ extern "C" int dotllm_metal_rope_f32(
         id<MTLBuffer> bufPos = bind_input(ctx, positions, posBytes, &offPos);
         if (!bufQ || !bufK || !bufPos) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -819,17 +980,12 @@ extern "C" int dotllm_metal_rope_f32(
         [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
         [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch_len, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        if (cmd.error != nil) return -11;
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
         return 0;
     }
 }
@@ -869,10 +1025,9 @@ extern "C" int dotllm_metal_rope_f16(
         id<MTLBuffer> bufPos = bind_input(ctx, positions, posBytes, &offPos);
         if (!bufQ || !bufK || !bufPos) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -887,17 +1042,12 @@ extern "C" int dotllm_metal_rope_f16(
         [enc setBytes:&theta        length:sizeof(float)   atIndex:8];
         [enc setBytes:&rope_type    length:sizeof(int32_t) atIndex:9];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if (dispatch_len > 0 && tgw > dispatch_len) tgw = dispatch_len;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)dispatch_len, 256);
 
         [enc dispatchThreads:MTLSizeMake(dispatch_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        if (cmd.error != nil) return -11;
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
         return 0;
     }
 }
@@ -918,10 +1068,12 @@ extern "C" int dotllm_metal_rmsnorm_f32(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32");
         if (!pipeline) return -3;
 
-        // Threadgroup size: up to 256 threads per row.
-        // This kernel uses dispatchThreadgroups (not dispatchThreads) because
-        // the unit of work here is a whole group, not a single thread.
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Threadgroup size: scaled to hidden dim. The kernel is reduction-heavy
+        // (mean of squares over n elements) so we prefer 512 threads per group
+        // when n is large enough, falling back to the simd width for tiny rows.
+        // `pick_tgw` honors the pipeline cap and rounds to a multiple of warp.
+        // The kernel's `simd_sums[32]` scratch is sized for up to 1024 threads.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(float);
@@ -933,10 +1085,9 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         id<MTLBuffer> bufOut = bind_output(ctx, output, inputBytes,  &offOut, &needCopy);
         if (!bufIn || !bufW || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -951,13 +1102,10 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         // Unlike dispatchThreads, this gives explicit control over group count.
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOut.contents, inputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOut.contents, inputBytes);
         return 0;
     }
 }
@@ -978,7 +1126,8 @@ extern "C" int dotllm_metal_rmsnorm_f16(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // See rmsnorm_f32: 512 preferred, capped by the pipeline.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
         NSUInteger weightBytes = (NSUInteger)n * sizeof(uint16_t);
@@ -990,10 +1139,9 @@ extern "C" int dotllm_metal_rmsnorm_f16(
         id<MTLBuffer> bufOut = bind_output(ctx, output, inputBytes,  &offOut, &needCopy);
         if (!bufIn || !bufW || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1005,13 +1153,10 @@ extern "C" int dotllm_metal_rmsnorm_f16(
 
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOut.contents, inputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOut.contents, inputBytes);
         return 0;
     }
 }
@@ -1043,10 +1188,9 @@ static int run_convert_kernel(
         id<MTLBuffer> bufDst = bind_output(ctx, dst, dstBytes, &offDst, &needCopy);
         if (!bufSrc || !bufDst) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1054,17 +1198,13 @@ static int run_convert_kernel(
         [enc setBuffer:bufDst offset:offDst atIndex:1];
         [enc setBytes:&n length:sizeof(int32_t) atIndex:2];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if ((NSUInteger)n < tgw) tgw = (NSUInteger)n;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)n, 256);
 
         [enc dispatchThreads:MTLSizeMake(n, 1, 1) threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(dst, bufDst.contents, dstBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(dst, bufDst.contents, dstBytes);
         return 0;
     }
 }
@@ -1085,7 +1225,9 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
             get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f32");
         if (!pipeline) return -3;
 
-        uint32_t tgSize   = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Per-head reduction: work per group = head_dim (typically 64-128).
+        // Cap at 128 so we don't waste threads on tiny rows.
+        uint32_t tgSize   = (uint32_t)pick_tgw(pipeline, (NSUInteger)head_dim, 128);
         uint32_t nGroups  = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
 
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(float);
@@ -1096,10 +1238,9 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
         id<MTLBuffer> bufWeight = bind_input(ctx, weight, weightBytes, &offW);
         if (!bufQK || !bufWeight) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1113,11 +1254,8 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f32(
         // One threadgroup per (token, head) pair.
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        if (cmd.error != nil) return -11;
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
         // bufQK wraps host memory directly — no memcpy needed.
         return 0;
     }
@@ -1139,7 +1277,8 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
             get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize  = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // See per_head_rmsnorm_f32: cap 128 for head_dim-sized reductions.
+        uint32_t tgSize  = (uint32_t)pick_tgw(pipeline, (NSUInteger)head_dim, 128);
         uint32_t nGroups = (uint32_t)(seq_len * num_heads); // one threadgroup per (token, head)
 
         NSUInteger qkBytes     = (NSUInteger)(seq_len * num_heads * head_dim) * sizeof(uint16_t);
@@ -1150,10 +1289,9 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
         id<MTLBuffer> bufWeight = bind_input(ctx, weight, weightBytes, &offW);
         if (!bufQK || !bufWeight) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1166,11 +1304,8 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
 
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        if (cmd.error != nil) return -11;
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
         return 0;
     }
 }
@@ -1191,7 +1326,8 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
             get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32in_f16out");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Reduction over hidden dim; allow up to 512 threads for better occupancy.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger inputBytes  = (NSUInteger)(seq_len * n) * sizeof(float);
         NSUInteger outputBytes = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
@@ -1204,10 +1340,9 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
         id<MTLBuffer> bufOut = bind_output(ctx, output, outputBytes, &offOut, &needCopy);
         if (!bufIn || !bufW || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1219,11 +1354,8 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
 
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
-
-        if (cmd.error != nil) return -11;
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
         memcpy(output, bufOut.contents, outputBytes);
         return 0;
@@ -1247,7 +1379,8 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
             get_or_create_pipeline(ctx, "fused_add_rmsnorm.metal", "fused_add_rmsnorm_f16");
         if (!pipeline) return -3;
 
-        uint32_t tgSize = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Reduction over hidden dim; cap at 512.
+        uint32_t tgSize = (uint32_t)pick_tgw(pipeline, (NSUInteger)n, 512);
 
         NSUInteger rowBytes    = (NSUInteger)n * sizeof(uint16_t);
         NSUInteger totalBytes  = (NSUInteger)(seq_len * n) * sizeof(uint16_t);
@@ -1270,10 +1403,9 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
 
         if (!bufRes || !bufX || !bufW || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1287,14 +1419,11 @@ extern "C" int dotllm_metal_fused_add_rmsnorm_f16(
         // One threadgroup per token.
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyRes) memcpy(residual, bufRes.contents, totalBytes);
-        if (needCopyOut) memcpy(output,   bufOut.contents, totalBytes);
+        if (needCopyRes && should_copy_back(&ks)) memcpy(residual, bufRes.contents, totalBytes);
+        if (needCopyOut && should_copy_back(&ks)) memcpy(output,   bufOut.contents, totalBytes);
         return 0;
     }
 }
@@ -1321,7 +1450,8 @@ static int run_embedding_kernel(
             get_or_create_pipeline(ctx, "embedding_f32out.metal", functionName);
         if (!pipeline) return -3;
 
-        uint32_t tgSize     = (uint32_t)MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // One threadgroup per token; threads copy/dequantize hidden_size elements.
+        uint32_t tgSize     = (uint32_t)pick_tgw(pipeline, (NSUInteger)hidden_size, 256);
         NSUInteger posBytes = (NSUInteger)seq_len * sizeof(int32_t);
         NSUInteger outBytes = (NSUInteger)(seq_len * hidden_size) * out_elem_bytes;
 
@@ -1332,10 +1462,9 @@ static int run_embedding_kernel(
         id<MTLBuffer> bufOut   = bind_output(ctx, output,      outBytes,          &offOut, &needCopy);
         if (!bufTable || !bufIds || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1348,13 +1477,10 @@ static int run_embedding_kernel(
         // One threadgroup per token; threads copy/dequantize hidden_size elements.
         [enc dispatchThreadgroups:MTLSizeMake(seq_len, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgSize, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOut.contents, outBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOut.contents, outBytes);
         return 0;
     }
 }
@@ -1507,9 +1633,9 @@ static int run_attention_f16_with_kvcache(
 
         if (!bufQ || !bufOut || !bufK || !bufV) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1529,17 +1655,17 @@ static int run_attention_f16_with_kvcache(
         NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
         [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
 
-        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Attention: each threadgroup processes head_dim work for its (token, head)
+        // pair, iterating over the KV cache in TILE_KV chunks. Cap 256 keeps smem
+        // small and matches the TILE_KV=256 tile size.
+        NSUInteger tgw     = pick_tgw(pipeline, (NSUInteger)head_dim, 256);
         NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOut.contents, outBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOut.contents, outBytes);
         return 0;
     }
 }
@@ -1606,10 +1732,9 @@ static int run_attention_kernel(
 
         if (!bufQ || !bufK || !bufV || !bufOut) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1631,17 +1756,17 @@ static int run_attention_kernel(
         NSUInteger smemBytes = (NSUInteger)(2 * head_dim + TILE_KV + 8) * sizeof(float);
         [enc setThreadgroupMemoryLength:smemBytes atIndex:0];
 
-        NSUInteger tgw     = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Attention: each threadgroup processes head_dim work for its (token, head)
+        // pair, iterating over the KV cache in TILE_KV chunks. Cap 256 keeps smem
+        // small and matches the TILE_KV=256 tile size.
+        NSUInteger tgw     = pick_tgw(pipeline, (NSUInteger)head_dim, 256);
         NSUInteger nGroups = (NSUInteger)(seq_q * num_heads);
         [enc dispatchThreadgroups:MTLSizeMake(nGroups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(output, bufOut.contents, outputBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(output, bufOut.contents, outputBytes);
         return 0;
     }
 }
@@ -1717,10 +1842,9 @@ static int run_quant_kv_kernel(
         id<MTLBuffer> bufDst = bind_output(ctx, dst, dst_bytes, &offDst, &needCopy);
         if (!bufSrc || !bufDst) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1729,19 +1853,14 @@ static int run_quant_kv_kernel(
         [enc setBytes:&total_blocks length:sizeof(int32_t) atIndex:2];
 
         // One thread per quantization block.
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
-        if ((NSUInteger)total_blocks < tgw) tgw = (NSUInteger)total_blocks;
-        if (tgw == 0) tgw = 1;
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)total_blocks, 256);
 
         [enc dispatchThreads:MTLSizeMake(total_blocks, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(dst, bufDst.contents, dst_bytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(dst, bufDst.contents, dst_bytes);
         return 0;
     }
 }
@@ -1805,10 +1924,9 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
         id<MTLBuffer> bufY = bind_output(ctx, y,      yBytes,      &offY, &needCopy);
         if (!bufW || !bufX || !bufY) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1818,17 +1936,15 @@ extern "C" int dotllm_metal_quantized_gemv_q8_0_f32in(
         [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
         [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
-        // One threadgroup per output row; 256 threads per group.
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // One threadgroup per output row; each thread strides over Q8_0 blocks
+        // (bpr = k/32). pick_tgw shrinks tgw when bpr < 256 (no idle threads).
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)bpr, 256);
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(y, bufY.contents, yBytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(y, bufY.contents, yBytes);
         return 0;
     }
 }
@@ -1866,10 +1982,9 @@ static int run_gemv_f16_kernel(
         id<MTLBuffer> bufY = bind_output(ctx, y,      yBytes,      &offY, &needCopyY);
         if (!bufW || !bufX || !bufY) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -1880,16 +1995,17 @@ static int run_gemv_f16_kernel(
         [enc setBytes:&n length:sizeof(int32_t) atIndex:3];
         [enc setBytes:&k length:sizeof(int32_t) atIndex:4];
 
-        NSUInteger tgw = MIN(pipeline.maxTotalThreadsPerThreadgroup, 256);
+        // Generic FP16 GEMV: 5 quant formats supported. bpr is k/32 for
+        // Q8_0/Q4_0/Q5_0 and k/256 for K-quants. We use k/32 as an upper bound
+        // (no underutilization for K-quants when k is large; harmless overshoot
+        // for tiny k since pick_tgw rounds to warp).
+        NSUInteger tgw = pick_tgw(pipeline, (NSUInteger)k / 32, 256);
         [enc dispatchThreadgroups:MTLSizeMake(n, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopyY) memcpy(y, bufY.contents, yBytes);
+        if (needCopyY && should_copy_back(&ks)) memcpy(y, bufY.contents, yBytes);
         return 0;
     }
 }
@@ -2004,10 +2120,9 @@ static int run_dequant_kernel(
         id<MTLBuffer> bufDst = bind_output(ctx, dst, dst_bytes, &offDst, &needCopy);
         if (!bufSrc || !bufDst) return -7;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
-
-        id<MTLComputeCommandEncoder> enc = [cmd computeCommandEncoder];
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLCommandBuffer>         cmd = ks.cmd;
+        id<MTLComputeCommandEncoder> enc = ks.enc;
         if (!enc) return -9;
 
         [enc setComputePipelineState:pipeline];
@@ -2017,13 +2132,10 @@ static int run_dequant_kernel(
 
         [enc dispatchThreadgroups:MTLSizeMake(n_groups, 1, 1)
             threadsPerThreadgroup:MTLSizeMake(tgw, 1, 1)];
-        [enc endEncoding];
-        [cmd commit];
-        [cmd waitUntilCompleted];
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
 
-        if (cmd.error != nil) return -11;
-
-        if (needCopy) memcpy(dst, bufDst.contents, dst_bytes);
+        if (needCopy && should_copy_back(&ks)) memcpy(dst, bufDst.contents, dst_bytes);
         return 0;
     }
 }
@@ -2242,19 +2354,35 @@ static int run_gemm(
                       beta:(double)beta];
         if (!mm) return -3;
 
-        id<MTLCommandBuffer> cmd = [ctx->queue commandBuffer];
-        if (!cmd) return -8;
+        // MPS opens its OWN encoder on the command buffer, so if we're inside
+        // a batched forward we must close the active compute encoder first,
+        // let MPS do its thing, then reopen a fresh compute encoder for the
+        // next kernels.
+        bool batched = (ctx->active_enc != nil);
+        id<MTLCommandBuffer> cmd;
+        if (batched) {
+            [ctx->active_enc endEncoding];
+            ctx->active_enc = nil;
+            cmd = ctx->active_cmd;
+        } else {
+            cmd = [ctx->queue commandBuffer];
+            if (!cmd) return -8;
+        }
 
         [mm encodeToCommandBuffer:cmd
                       leftMatrix:matA
                      rightMatrix:matB
                     resultMatrix:matC];
 
+        if (batched) {
+            ctx->active_enc = [cmd computeCommandEncoder];
+            if (!ctx->active_enc) return -9;
+            return 0;
+        }
+
         [cmd commit];
         [cmd waitUntilCompleted];
-
         if (cmd.error != nil) return -11;
-
         if (needCopyC) memcpy(c, bufC.contents, cBytes);
         return 0;
     }
@@ -2292,4 +2420,76 @@ extern "C" int dotllm_metal_gemm_f32(
 {
     return run_gemm(ctx, MPSDataTypeFloat32, sizeof(float),
                     a, b, c, m, n, k, transpose_a, transpose_b, alpha, beta);
+}
+
+// ── FP16 GEMM via simdgroup_matrix (no-transpose A / transpose B) ────────────
+//
+// LLM-projection-only entry point: C = A @ B^T with A:[M,K], B:[N,K], C:[M,N].
+// FP32 accumulation inside the kernel, FP16 storage.
+// Mode constraints: alpha == 1 and beta == 0 (we do not read C); transpose_a
+// must be 0; transpose_b must be 1. Any M, N, K ≥ 1 are accepted — boundary
+// tiles are handled by per-element bounds checks inside the kernel.
+// Returns -10 on invalid args, -1 on unsupported modes (caller falls back to MPS).
+
+extern "C" int dotllm_metal_gemm_f16_smm(
+    dotllm_metal_context* ctx,
+    const uint16_t* a,
+    const uint16_t* b,
+    uint16_t*       c,
+    int32_t         m,
+    int32_t         n,
+    int32_t         k,
+    int32_t         transpose_a,
+    int32_t         transpose_b,
+    float           alpha,
+    float           beta)
+{
+    @autoreleasepool {
+        if (!ctx || !a || !b || !c) return -10;
+        if (m <= 0 || n <= 0 || k <= 0) return -10;
+
+        if (transpose_a != 0 || transpose_b == 0) return -1;
+        if (alpha != 1.0f || beta != 0.0f) return -1;
+
+        id<MTLComputePipelineState> pipeline =
+            get_or_create_pipeline(ctx, "gemm_f16_smm.metal", "gemm_f16_smm_ntb");
+        if (!pipeline) return -3;
+
+        NSUInteger aBytes = (NSUInteger)m * k * sizeof(uint16_t);
+        NSUInteger bBytes = (NSUInteger)n * k * sizeof(uint16_t);
+        NSUInteger cBytes = (NSUInteger)m * n * sizeof(uint16_t);
+
+        NSUInteger offA = 0, offB = 0, offC = 0;
+        bool needCopyC = false;
+        id<MTLBuffer> bufA = bind_input (ctx, a, aBytes, &offA);
+        id<MTLBuffer> bufB = bind_input (ctx, b, bBytes, &offB);
+        id<MTLBuffer> bufC = bind_output(ctx, c, cBytes, &offC, &needCopyC);
+        if (!bufA || !bufB || !bufC) return -7;
+
+        dotllm_kernel_scope ks = begin_kernel(ctx);
+        id<MTLComputeCommandEncoder> enc = ks.enc;
+        if (!enc) return -9;
+
+        [enc setComputePipelineState:pipeline];
+        [enc setBuffer:bufA offset:offA atIndex:0];
+        [enc setBuffer:bufB offset:offB atIndex:1];
+        [enc setBuffer:bufC offset:offC atIndex:2];
+        [enc setBytes:&m length:sizeof(int32_t) atIndex:3];
+        [enc setBytes:&n length:sizeof(int32_t) atIndex:4];
+        [enc setBytes:&k length:sizeof(int32_t) atIndex:5];
+
+        // 32×32 output tile per threadgroup, 4 simdgroups (128 threads) per group.
+        // Grid uses ceil() so partial tiles at the bottom/right edges still get
+        // a threadgroup — the kernel masks OOB elements internally.
+        NSUInteger gridX = (NSUInteger)((n + 31) / 32);
+        NSUInteger gridY = (NSUInteger)((m + 31) / 32);
+        MTLSize tgGrid = MTLSizeMake(gridX, gridY, 1);
+        MTLSize tgSize = MTLSizeMake(128, 1, 1);
+        [enc dispatchThreadgroups:tgGrid threadsPerThreadgroup:tgSize];
+
+        int rc = finish_kernel(&ks);
+        if (rc) return rc;
+        if (needCopyC && should_copy_back(&ks)) memcpy(c, bufC.contents, cBytes);
+        return 0;
+    }
 }

@@ -431,3 +431,7 @@ tests/.models/
 *.metallib
 
 *.xcuserstate
+
+.idea/.idea.dotLLM/.idea/
+
+.claude/settings.local.json
