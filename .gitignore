@@ -433,3 +433,5 @@ tests/.models/
 *.xcuserstate
 
 .idea/.idea.dotLLM/.idea/
+
+.claude/settings.local.json

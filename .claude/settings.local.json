@@ -46,7 +46,8 @@
       "Bash(bash native/build.sh)",
       "Bash(./build.sh)",
       "Bash(otool -L ./native/metal/bin/libdotllmmetal.dylib)",
-      "Bash(awk 'NR>=108 && NR<=170' ./src/DotLLM.Metal/Metal.md)"
+      "Bash(awk 'NR>=108 && NR<=170' ./src/DotLLM.Metal/Metal.md)",
+      "Bash(awk 'NR>=300 && NR<=410' /Users/codeanythingpossible/dev/dotLLM-fork/src/DotLLM.Metal/Metal.md)"
     ]
   }
 }
