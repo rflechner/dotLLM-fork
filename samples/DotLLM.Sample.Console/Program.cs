@@ -1,10 +1,16 @@
+using System.Diagnostics.CodeAnalysis;
+using System.Runtime.InteropServices;
 using DotLLM.Core.Configuration;
+using DotLLM.Core.Models;
+using DotLLM.Cuda;
 using DotLLM.Engine;
 using DotLLM.Engine.Samplers;
 using DotLLM.Engine.Samplers.StopConditions;
+using DotLLM.Metal;
+using DotLLM.Metal.Weights.Strategies;
+using DotLLM.Models;
 using DotLLM.Models.Architectures;
 using DotLLM.Models.Gguf;
-using DotLLM.Tokenizers.Bpe;
 
 if (args.Length < 1)
 {
@@ -18,9 +24,9 @@ string modelPath = args[0];
 string prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "The capital of France is";
 
 Console.WriteLine($"Loading model: {modelPath}");
-using var gguf = GgufFile.Open(modelPath);
-var config = GgufModelConfigExtractor.Extract(gguf.Metadata);
-using var model = TransformerModel.LoadFromGguf(gguf, config);
+
+(IModel model, GgufFile gguf, ModelConfig config) = LoadModel();
+
 var tokenizer = GgufBpeTokenizerFactory.Load(gguf.Metadata);
 
 Console.WriteLine($"Model: {config.Architecture}, {config.NumLayers} layers, {config.VocabSize} vocab");
@@ -71,3 +77,35 @@ Console.WriteLine($"[Prefill: {timings.PrefillTimeMs:F1} ms ({timings.PrefillTok
     $"Sampling: {timings.SamplingTimeMs:F1} ms]");
 
 return 0;
+
+ModelRunContext LoadModel()
+{
+    ModelRunContext LoadModelFromCpu()
+    {
+        var ggufFile = GgufFile.Open(modelPath);
+        var modelConfig = GgufModelConfigExtractor.Extract(ggufFile.Metadata);
+        var transformerModel = TransformerModel.LoadFromGguf(ggufFile, modelConfig);
+
+        return new ModelRunContext(transformerModel, ggufFile, modelConfig);
+    }
+
+    var forceCpuVar = Environment.GetEnvironmentVariable("FORCE_CPU_LLM");
+    if (!string.IsNullOrEmpty(forceCpuVar) && bool.TryParse(forceCpuVar, out var forceCpu) && forceCpu)
+    {
+        return LoadModelFromCpu();
+    }
+
+    if (CudaDevice.IsAvailable())
+    {
+        var device = CudaDevice.GetDevice(0);
+        Console.WriteLine($"CUDA available: using {device}.");
+        return CudaModelLoader.LoadFromGguf(modelPath, deviceId: 0);
+    }
+
+    if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+    {
+        return MetalModelLoader.LoadFromGguf(modelPath, new HybridStrategy());
+    }
+
+    return LoadModelFromCpu();
+}
