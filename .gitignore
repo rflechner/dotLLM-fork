@@ -425,3 +425,12 @@ FodyWeavers.xsd
 
 # dotLLM test model cache
 tests/.models/
+
+.DS_Store
+
+*.metallib
+
+*.xcuserstate
+
+.idea/
+.claude/settings.local.json
