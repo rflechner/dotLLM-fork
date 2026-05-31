@@ -22,7 +22,7 @@ public sealed class RmsNormTests
 
     // ── Single token ─────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_MatchesCpu()
     {
         const int n = 8;
@@ -44,7 +44,7 @@ public sealed class RmsNormTests
 
     // ── Multiple tokens ───────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MatchesCpu()
     {
         const int n = 16, seqLen = 4;
@@ -69,7 +69,7 @@ public sealed class RmsNormTests
     // x = [1, 1, …, 1], weight = [1, 1, …, 1]
     // mean_sq = 1, rms = sqrt(1 + eps), output[i] = 1 / sqrt(1 + eps)
 
-    [Fact]
+    [MetalTestFact]
     public void UniformInput_OutputIsApproximatelyOne()
     {
         const int n = 8;
@@ -89,7 +89,7 @@ public sealed class RmsNormTests
     // ── Weight scaling applied correctly ──────────────────────────────────────
     // If weight[i] = 2 for all i, output[i] must be ×2 compared to weight = 1.
 
-    [Fact]
+    [MetalTestFact]
     public void WeightScaling_DoublesOutput()
     {
         const int n = 8;
@@ -113,7 +113,7 @@ public sealed class RmsNormTests
 
     // ── Epsilon prevents division by zero ─────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NearZeroInput_EpsilonPreventsNaN()
     {
         const int n = 8;
@@ -135,7 +135,7 @@ public sealed class RmsNormTests
 
     // ── Large hidden dim (Llama-style) ────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeHiddenDim_MatchesCpu()
     {
         const int n = 128, seqLen = 8;
@@ -158,7 +158,7 @@ public sealed class RmsNormTests
 
     // ── Non-default epsilon changes the result ────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void DifferentEpsilon_MatchesCpu()
     {
         const int n = 8;
@@ -214,7 +214,7 @@ public sealed class RmsNormF16Tests
 
     // ── Single token ─────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_MatchesCpu()
     {
         const int n = 8;
@@ -236,7 +236,7 @@ public sealed class RmsNormF16Tests
 
     // ── Multiple tokens ───────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MatchesCpu()
     {
         const int n = 16, seqLen = 4;
@@ -260,7 +260,7 @@ public sealed class RmsNormF16Tests
     // ── Uniform input: résultat analytiquement connu ─────────────────────────
     // x = [1, 1, …, 1], w = [1, 1, …, 1] → output[i] ≈ 1 / sqrt(1 + eps)
 
-    [Fact]
+    [MetalTestFact]
     public void UniformInput_OutputIsApproximatelyOne()
     {
         const int n = 8;
@@ -280,7 +280,7 @@ public sealed class RmsNormF16Tests
 
     // ── Epsilon empêche la division par zéro ─────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NearZeroInput_EpsilonPreventsNaN()
     {
         const int n = 8;
@@ -303,7 +303,7 @@ public sealed class RmsNormF16Tests
 
     // ── Large hidden dim (Llama-style) ────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeHiddenDim_MatchesCpu()
     {
         const int n = 128, seqLen = 8;
@@ -348,7 +348,7 @@ public sealed class RmsNormF32InF16OutTests
 
     // ── Single token ─────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_MatchesCpu()
     {
         const int n = 8;
@@ -370,7 +370,7 @@ public sealed class RmsNormF32InF16OutTests
 
     // ── Multiple tokens ───────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MatchesCpu()
     {
         const int n = 16, seqLen = 4;
@@ -394,7 +394,7 @@ public sealed class RmsNormF32InF16OutTests
     // ── Uniform input ─────────────────────────────────────────────────────────
     // x = [1,…,1], w = [1,…,1] → output[i] = FP16(1 / sqrt(1 + eps)) ≈ 1
 
-    [Fact]
+    [MetalTestFact]
     public void UniformInput_OutputIsApproximatelyOne()
     {
         const int n = 8;
@@ -413,7 +413,7 @@ public sealed class RmsNormF32InF16OutTests
 
     // ── Epsilon prevents NaN ──────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NearZeroInput_EpsilonPreventsNaN()
     {
         const int n = 8;
@@ -436,7 +436,7 @@ public sealed class RmsNormF32InF16OutTests
 
     // ── Large hidden dim ──────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeHiddenDim_MatchesCpu()
     {
         const int n = 128, seqLen = 8;

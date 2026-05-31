@@ -44,7 +44,7 @@ public sealed class SoftmaxF16Tests
 
     // ── Single-row tests ──────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_Uniform_ProducesEqual()
     {
         Half[]  input  = H(1f, 1f, 1f, 1f);
@@ -57,7 +57,7 @@ public sealed class SoftmaxF16Tests
         AssertClose(cpu, output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_SumsToOne()
     {
         Half[] input  = H(1f, 2f, 3f, 4f, 5f);
@@ -71,7 +71,7 @@ public sealed class SoftmaxF16Tests
         Assert.Equal(1f, sum, Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_LargeValues_NumericallyStable()
     {
         // Values near FP16 max — subtracting max prevents overflow
@@ -90,7 +90,7 @@ public sealed class SoftmaxF16Tests
         Assert.True((float)output[1] > (float)output[0]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_SingleElement_ProducesOne()
     {
         Half[] input  = H(42f);
@@ -102,7 +102,7 @@ public sealed class SoftmaxF16Tests
         Assert.Equal((Half)1f, output[0]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_AllNegative_StillValid()
     {
         // Values must stay within FP16 range after exp(x - max):
@@ -120,7 +120,7 @@ public sealed class SoftmaxF16Tests
         Assert.Equal(1f, sum, Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_VectorOverload_MatchesRowCols()
     {
         // The convenience overload must produce the same result as rows=1, cols=n
@@ -135,7 +135,7 @@ public sealed class SoftmaxF16Tests
         Assert.Equal(output1, output2);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpuReference()
     {
         var rng = new Random(7);
@@ -154,7 +154,7 @@ public sealed class SoftmaxF16Tests
 
     // ── Multi-row (batch) tests ───────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultiRow_EachRowSumsToOne()
     {
         // 3 tokens, 4 classes each
@@ -172,7 +172,7 @@ public sealed class SoftmaxF16Tests
         }
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultiRow_UniformRow_AllEqual()
     {
         // Row 1 is all-same — should produce 0.25 each
@@ -186,7 +186,7 @@ public sealed class SoftmaxF16Tests
             Assert.Equal(0.25f, (float)output[4 + i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultiRow_MatchesCpuReference()
     {
         // Simulates a typical decode step: 8 tokens × 512 vocab
@@ -205,7 +205,7 @@ public sealed class SoftmaxF16Tests
         AssertClose(cpu, output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeVocab_StressesColumnLoop_MatchesCpu()
     {
         // cols > 256 (tiles the inner loop multiple times per thread)
@@ -226,7 +226,7 @@ public sealed class SoftmaxF16Tests
 
     // ── Validation ───────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void InputLengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -234,7 +234,7 @@ public sealed class SoftmaxF16Tests
             SoftmaxF16.Execute(ctx, new Half[6], new Half[8], rows: 2, cols: 4));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void OutputTooSmall_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -242,7 +242,7 @@ public sealed class SoftmaxF16Tests
             SoftmaxF16.Execute(ctx, new Half[8], new Half[6], rows: 2, cols: 4));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyInput_ReturnsSilently()
     {
         using var ctx = new MetalContext();

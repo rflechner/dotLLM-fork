@@ -23,7 +23,7 @@ public sealed class BiasAddF32Tests
         return result;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_BiasIsAdded()
     {
         float[] output = [1.0f, 2.0f, 3.0f, 4.0f];
@@ -35,7 +35,7 @@ public sealed class BiasAddF32Tests
         Assert.Equal([11.0f, 22.0f, 33.0f, 44.0f], output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_SameBiasAppliedToEach()
     {
         // seqLen=3, dim=2
@@ -50,7 +50,7 @@ public sealed class BiasAddF32Tests
         Assert.Equal([11.0f, 22.0f, 13.0f, 24.0f, 15.0f, 26.0f], output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroBias_OutputUnchanged()
     {
         float[] output   = [1.0f, 2.0f, 3.0f, 4.0f];
@@ -63,7 +63,7 @@ public sealed class BiasAddF32Tests
         Assert.Equal(expected, output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void NegativeBias_SubtractsCorrectly()
     {
         float[] output = [5.0f, 5.0f, 5.0f];
@@ -75,7 +75,7 @@ public sealed class BiasAddF32Tests
         Assert.Equal([4.0f, 3.0f, 2.0f], output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ScalarReference_MatchesMetal()
     {
         var rng = new Random(42);
@@ -97,7 +97,7 @@ public sealed class BiasAddF32Tests
             Assert.Equal(expected[i], output[i], 1e-2f); // FP16 bias → FP32 cast ~0.1% error
     }
 
-    [Fact]
+    [MetalTestFact]
     public void BiasMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -105,7 +105,7 @@ public sealed class BiasAddF32Tests
             BiasAddF32.Execute(ctx, new float[8], H(0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void OutputSizeMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -113,7 +113,7 @@ public sealed class BiasAddF32Tests
             BiasAddF32.Execute(ctx, new float[7], H(0f, 0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyOutput_ReturnsSilently()
     {
         using var ctx = new MetalContext();
@@ -139,7 +139,7 @@ public sealed class BiasAddF16Tests
         return result;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_BiasIsAdded()
     {
         Half[] output = H(1.0f, 2.0f, 3.0f, 4.0f);
@@ -151,7 +151,7 @@ public sealed class BiasAddF16Tests
         Assert.Equal(H(11.0f, 22.0f, 33.0f, 44.0f), output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_SameBiasAppliedToEach()
     {
         // seqLen=3, dim=4 (even, exercises half2 path)
@@ -165,7 +165,7 @@ public sealed class BiasAddF16Tests
         Assert.Equal(expected, output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroBias_OutputUnchanged()
     {
         Half[] output   = H(1.0f, 2.0f, 3.0f, 4.0f);
@@ -178,7 +178,7 @@ public sealed class BiasAddF16Tests
         Assert.Equal(expected, output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void NegativeBias_SubtractsCorrectly()
     {
         Half[] output = H(5.0f, 5.0f, 5.0f, 5.0f);
@@ -190,7 +190,7 @@ public sealed class BiasAddF16Tests
         Assert.Equal(H(4.0f, 3.0f, 2.0f, 1.0f), output);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ScalarReference_MatchesMetal()
     {
         var rng = new Random(99);
@@ -213,7 +213,7 @@ public sealed class BiasAddF16Tests
             Assert.Equal((float)expected[i], (float)output[i], tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void BiasMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -221,7 +221,7 @@ public sealed class BiasAddF16Tests
             BiasAddF16.Execute(ctx, new Half[8], H(0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void OutputSizeMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -229,7 +229,7 @@ public sealed class BiasAddF16Tests
             BiasAddF16.Execute(ctx, new Half[7], H(0f, 0f, 0f, 0f), dim: 4, seqLen: 2));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyOutput_ReturnsSilently()
     {
         using var ctx = new MetalContext();

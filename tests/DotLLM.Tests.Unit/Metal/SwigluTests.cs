@@ -19,7 +19,7 @@ public sealed class SwigluF32Tests
         return result;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchExpected()
     {
         // SiLU(0) = 0 * sigmoid(0) = 0 → result = 0 * up
@@ -36,7 +36,7 @@ public sealed class SwigluF32Tests
             Assert.Equal(expected[i], result[i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroGate_ProducesZero()
     {
         float[] gate   = [0f, 0f, 0f, 0f];
@@ -49,7 +49,7 @@ public sealed class SwigluF32Tests
         Assert.All(result, v => Assert.Equal(0f, v, Tol));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroUp_ProducesZero()
     {
         float[] gate   = [1f, 2f, 3f, 4f];
@@ -62,7 +62,7 @@ public sealed class SwigluF32Tests
         Assert.All(result, v => Assert.Equal(0f, v, Tol));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ScalarReference_MatchesCpu()
     {
         var rng = new Random(42);
@@ -83,14 +83,14 @@ public sealed class SwigluF32Tests
             Assert.Equal(expected[i], result[i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptySpans_ReturnsSilently()
     {
         using var ctx = new MetalContext();
         SwigluF32.Execute(ctx, [], [], []);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -98,7 +98,7 @@ public sealed class SwigluF32Tests
             SwigluF32.Execute(ctx, [1f, 2f], [1f], new float[2]));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ResultTooSmall_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -129,7 +129,7 @@ public sealed class SwigluF16Tests
         return r;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchCpu()
     {
         Half[] gate   = H(0f, 1f, -1f, 2f);
@@ -144,7 +144,7 @@ public sealed class SwigluF16Tests
             Assert.Equal(expected[i], (float)result[i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void OddLength_HandlesTrailingElement()
     {
         // length=5: half2 covers [0,1] and [2,3]; element 4 is the odd tail
@@ -160,7 +160,7 @@ public sealed class SwigluF16Tests
             Assert.Equal(expected[i], (float)result[i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroGate_ProducesZero()
     {
         Half[] gate   = H(0f, 0f, 0f, 0f);
@@ -173,7 +173,7 @@ public sealed class SwigluF16Tests
         Assert.All(result, v => Assert.Equal(0f, (float)v, Tol));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ScalarReference_MatchesCpu()
     {
         var rng = new Random(7);
@@ -194,14 +194,14 @@ public sealed class SwigluF16Tests
             Assert.Equal(expected[i], (float)result[i], Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptySpans_ReturnsSilently()
     {
         using var ctx = new MetalContext();
         SwigluF16.Execute(ctx, [], [], []);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();

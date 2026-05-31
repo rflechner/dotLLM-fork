@@ -32,7 +32,7 @@ public sealed class PerHeadRmsNormTests
 
     // ── Single token, single head ─────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_SingleHead_MatchesCpu()
     {
         const int numHeads = 1, headDim = 8, seqLen = 1;
@@ -54,7 +54,7 @@ public sealed class PerHeadRmsNormTests
 
     // ── Multiple heads per token ──────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_MultipleHeads_EachHeadNormalizedIndependently()
     {
         const int numHeads = 4, headDim = 8, seqLen = 1;
@@ -76,7 +76,7 @@ public sealed class PerHeadRmsNormTests
 
     // ── Multiple tokens and heads ─────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MultipleHeads_MatchesCpu()
     {
         const int numHeads = 4, headDim = 16, seqLen = 3;
@@ -100,7 +100,7 @@ public sealed class PerHeadRmsNormTests
     // Two heads with different magnitudes must each have rms ≈ 1 after normalization
     // (when weight = 1). We verify rms(head) ≈ 1 for each head individually.
 
-    [Fact]
+    [MetalTestFact]
     public void EachHead_HasUnitRmsAfterNorm_WhenWeightIsOne()
     {
         const int numHeads = 2, headDim = 8, seqLen = 1;
@@ -130,7 +130,7 @@ public sealed class PerHeadRmsNormTests
 
     // ── Llama-scale inputs (GQA style) ───────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeInput_MatchesCpu()
     {
         const int numHeads = 32, headDim = 128, seqLen = 4;
@@ -193,7 +193,7 @@ public sealed class PerHeadRmsNormF16Tests
 
     // ── Single token, single head ─────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_SingleHead_MatchesCpu()
     {
         const int numHeads = 1, headDim = 8, seqLen = 1;
@@ -216,7 +216,7 @@ public sealed class PerHeadRmsNormF16Tests
 
     // ── Multiple heads per token ──────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_MultipleHeads_EachHeadNormalizedIndependently()
     {
         const int numHeads = 4, headDim = 8, seqLen = 1;
@@ -239,7 +239,7 @@ public sealed class PerHeadRmsNormF16Tests
 
     // ── Multiple tokens and heads ─────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MultipleHeads_MatchesCpu()
     {
         const int numHeads = 4, headDim = 16, seqLen = 3;
@@ -262,7 +262,7 @@ public sealed class PerHeadRmsNormF16Tests
 
     // ── Each head independently normalized (unit-rms check) ───────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void EachHead_HasUnitRmsAfterNorm_WhenWeightIsOne()
     {
         const int numHeads = 2, headDim = 8, seqLen = 1;
@@ -291,7 +291,7 @@ public sealed class PerHeadRmsNormF16Tests
 
     // ── Llama-scale inputs ────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeInput_MatchesCpu()
     {
         const int numHeads = 32, headDim = 128, seqLen = 4;

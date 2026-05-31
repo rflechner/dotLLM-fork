@@ -48,7 +48,7 @@ public sealed class GemmF32Tests
 
     // ── Basic non-transposed: C = A · B ──────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NoTranspose_SmallMatrix_MatchesCpu()
     {
         const int m = 3, k = 4, n = 5;
@@ -70,7 +70,7 @@ public sealed class GemmF32Tests
 
     // ── LLM projection layout: Y = X · Wᵀ, W stored as [N, K] ────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void TransposeRight_LlamaProjection_MatchesCpu()
     {
         const int m = 4;     // seqLen
@@ -94,7 +94,7 @@ public sealed class GemmF32Tests
 
     // ── Both transposed ──────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void BothTransposed_MatchesCpu()
     {
         const int m = 4, k = 6, n = 5;
@@ -117,7 +117,7 @@ public sealed class GemmF32Tests
 
     // ── alpha != 1, beta != 0 (accumulate into existing C) ───────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void AlphaBeta_AccumulatesIntoC()
     {
         const int m = 3, k = 4, n = 3;
@@ -141,7 +141,7 @@ public sealed class GemmF32Tests
 
     // ── Identity check: I · B = B ────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void IdentityTimesMatrix_ReturnsMatrix()
     {
         const int n = 8, k = 8, m = n;
@@ -162,7 +162,7 @@ public sealed class GemmF32Tests
 
     // ── Large matrices (Llama-7B FFN dimensions) ─────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeMatrix_LlamaFfnSize_MatchesCpu()
     {
         // Tiny version of FFN: seqLen × hidden · hidden × inter (transposed)
@@ -225,7 +225,7 @@ public sealed class GemmF16Tests
         return c;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void NoTranspose_SmallMatrix_MatchesCpu()
     {
         const int m = 3, k = 4, n = 5;
@@ -245,7 +245,7 @@ public sealed class GemmF16Tests
         AssertCloseRel(expected, c);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void TransposeRight_LlamaProjection_MatchesCpu()
     {
         const int m = 4, k = 16, n = 32;
@@ -265,7 +265,7 @@ public sealed class GemmF16Tests
         AssertCloseRel(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeMatrix_LlamaFfnSize_MatchesCpu()
     {
         const int m = 8, k = 64, n = 128;

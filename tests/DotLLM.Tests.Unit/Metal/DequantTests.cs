@@ -137,7 +137,7 @@ public sealed class DequantTests
 
     // ── Q8_0 ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_SingleBlock_MatchesCpu()
     {
         const int blocks = 1, elems = blocks * 32;
@@ -151,7 +151,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_MultipleBlocks_MatchesCpu()
     {
         const int blocks = 16, elems = blocks * 32;
@@ -165,7 +165,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ZeroWeights_OutputIsZero()
     {
         const int blocks = 4, elems = blocks * 32;
@@ -183,7 +183,7 @@ public sealed class DequantTests
 
     // ── Q4_0 ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_SingleBlock_MatchesCpu()
     {
         const int blocks = 1, elems = blocks * 32;
@@ -197,7 +197,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_MultipleBlocks_MatchesCpu()
     {
         const int blocks = 12, elems = blocks * 32;
@@ -213,7 +213,7 @@ public sealed class DequantTests
 
     // ── Q5_0 ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q5_0_SingleBlock_MatchesCpu()
     {
         const int blocks = 1, elems = blocks * 32;
@@ -227,7 +227,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q5_0_MultipleBlocks_MatchesCpu()
     {
         const int blocks = 8, elems = blocks * 32;
@@ -243,7 +243,7 @@ public sealed class DequantTests
 
     // ── Q4_K ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_K_SingleSuperblock_MatchesCpu()
     {
         const int sbs = 1, elems = sbs * 256;
@@ -257,7 +257,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_K_MultipleSuperblocks_MatchesCpu()
     {
         const int sbs = 4, elems = sbs * 256;
@@ -280,7 +280,7 @@ public sealed class DequantTests
     //   - sub_qh = qh + sub * 4   (should share qh[0..31] with bit = (qh[pos] >> sub) & 1)
     // Both the CUDA and Metal kernels will be corrected together in a follow-up PR.
 
-    [Fact(Skip = "Potential bug: Q5_K qs/qh layout mismatch, inherited from CUDA — fix tracked in follow-up PR")]
+    [MetalTestFact(Skip = "Potential bug: Q5_K qs/qh layout mismatch, inherited from CUDA — fix tracked in follow-up PR")]
     public void Q5_K_SingleSuperblock_MatchesCpu()
     {
         const int sbs = 1, elems = sbs * 256;
@@ -294,7 +294,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact(Skip = "Potential bug: Q5_K qs/qh layout mismatch, inherited from CUDA — fix tracked in follow-up PR")]
+    [MetalTestFact(Skip = "Potential bug: Q5_K qs/qh layout mismatch, inherited from CUDA — fix tracked in follow-up PR")]
     public void Q5_K_MultipleSuperblocks_MatchesCpu()
     {
         const int sbs = 4, elems = sbs * 256;
@@ -310,7 +310,7 @@ public sealed class DequantTests
 
     // ── Q6_K ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q6_K_SingleSuperblock_MatchesCpu()
     {
         const int sbs = 1, elems = sbs * 256;
@@ -324,7 +324,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q6_K_MultipleSuperblocks_MatchesCpu()
     {
         const int sbs = 4, elems = sbs * 256;
@@ -338,7 +338,7 @@ public sealed class DequantTests
         AssertEqual(expected, dst);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q6_K_ZeroScale_OutputIsZero()
     {
         // d = 0 (Half = 0x0000, which is the zero-init default) → all outputs zero.

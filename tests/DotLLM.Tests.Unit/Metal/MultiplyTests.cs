@@ -6,7 +6,7 @@ namespace DotLLM.Tests.Unit.Metal;
 
 public sealed class MultiplyTests
 {
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchExpected()
     {
         using var ctx = new MetalContext();

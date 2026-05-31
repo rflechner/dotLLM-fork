@@ -8,7 +8,7 @@ public sealed class ConvertTests
 {
     // ── F16 → F32 ────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void F16ToF32_KnownValues_ExactMatch()
     {
         // float16 → float32 is lossless: every half value is representable as float.
@@ -22,7 +22,7 @@ public sealed class ConvertTests
             Assert.Equal((float)src[i], dst[i]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F16ToF32_RandomValues_MatchCpuCast()
     {
         var rng = new Random(1);
@@ -40,7 +40,7 @@ public sealed class ConvertTests
 
     // ── F32 → F16 ────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void F32ToF16_KnownValues_WithinHalfPrecision()
     {
         // float32 → float16 loses precision. Round-trip via CPU cast is the reference.
@@ -54,7 +54,7 @@ public sealed class ConvertTests
             Assert.Equal((Half)src[i], dst[i]); // Metal and CPU use the same rounding
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F32ToF16_RandomValues_MatchCpuCast()
     {
         var rng = new Random(2);
@@ -72,7 +72,7 @@ public sealed class ConvertTests
 
     // ── Round-trip F32 → F16 → F32 ───────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void RoundTrip_F32ToF16ToF32_WithinHalfPrecision()
     {
         // After a round-trip, the error is at most the float16 precision (~1/1000).
@@ -93,7 +93,7 @@ public sealed class ConvertTests
 
     // ── Edge cases ────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void F32ToF16_Zero_IsExact()
     {
         float[] src = [0f, -0f];
@@ -106,7 +106,7 @@ public sealed class ConvertTests
         Assert.Equal((Half)(-0f), dst[1]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F16ToF32_LargeArray_MatchesCpuCast()
     {
         const int n = 1024;

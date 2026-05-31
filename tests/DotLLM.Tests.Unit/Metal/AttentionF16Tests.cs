@@ -73,7 +73,7 @@ public sealed class AttentionF16Tests
 
     // ── Tests ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_SingleToken_SingleHead_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -85,7 +85,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_SingleToken_MultiHead_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -97,7 +97,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_MultiToken_Prefill_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -109,7 +109,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_Decode_WithCachedContext_MatchesCpu()
     {
         const int cached = 16;
@@ -122,7 +122,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_4to1_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -134,7 +134,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_8to2_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -146,7 +146,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SlidingWindow_MatchesCpu()
     {
         // Same off-by-one as AttentionF32Tests: CUDA/Metal masks distance > N,
@@ -173,7 +173,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpuRef, gpuOut);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeHeadDim_128_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -185,7 +185,7 @@ public sealed class AttentionF16Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeSeqKv_StressesKvTiling_MatchesCpu()
     {
         // seqKv = 512 > TILE_KV = 256: exercises the tile loop.

@@ -44,7 +44,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Single token ─────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_OutputMatchesCpu()
     {
         const int n = 8, seqLen = 1;
@@ -67,7 +67,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Residual is updated in-place ─────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SingleToken_ResidualUpdatedInPlace()
     {
         const int n = 8, seqLen = 1;
@@ -91,7 +91,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Multiple tokens ───────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleTokens_MatchesCpu()
     {
         const int n = 16, seqLen = 4;
@@ -115,7 +115,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Zero x: residual unchanged, output = RMSNorm(residual) ───────────────
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroX_ResidualUnchanged_OutputIsRmsNormOfResidual()
     {
         const int n = 8, seqLen = 1;
@@ -141,7 +141,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Epsilon prevents NaN on near-zero input ───────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NearZeroInput_EpsilonPreventsNaN()
     {
         const int n = 8, seqLen = 1;
@@ -165,7 +165,7 @@ public sealed class FusedAddRmsNormTests
 
     // ── Large input (Llama-like hidden dim) ───────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeInput_MatchesCpu()
     {
         const int n = 128, seqLen = 8;

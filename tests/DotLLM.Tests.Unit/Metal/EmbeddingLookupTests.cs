@@ -57,7 +57,7 @@ public sealed class EmbeddingLookupTests
 
     // ── F32 table ─────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void F32_SingleToken_MatchesCpu()
     {
         const int vocabSize = 8, hiddenSize = 16, seqLen = 1;
@@ -75,7 +75,7 @@ public sealed class EmbeddingLookupTests
         for (int i = 0; i < output.Length; i++) Assert.Equal(expected[i], output[i]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F32_MultipleTokens_MatchesCpu()
     {
         const int vocabSize = 16, hiddenSize = 8, seqLen = 4;
@@ -93,7 +93,7 @@ public sealed class EmbeddingLookupTests
         for (int i = 0; i < output.Length; i++) Assert.Equal(expected[i], output[i]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F32_RepeatedTokenId_ProducesSameRow()
     {
         // Looking up the same token twice must produce identical rows.
@@ -113,7 +113,7 @@ public sealed class EmbeddingLookupTests
 
     // ── F16 table ─────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void F16_SingleToken_MatchesCpu()
     {
         const int vocabSize = 8, hiddenSize = 16, seqLen = 1;
@@ -132,7 +132,7 @@ public sealed class EmbeddingLookupTests
         for (int i = 0; i < output.Length; i++) Assert.Equal(expected[i], output[i]);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void F16_MultipleTokens_MatchesCpu()
     {
         const int vocabSize = 16, hiddenSize = 8, seqLen = 4;
@@ -152,7 +152,7 @@ public sealed class EmbeddingLookupTests
 
     // ── Q8_0 table ────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_SingleToken_MatchesCpu()
     {
         const int vocabSize = 4, hiddenSize = 32, seqLen = 1;
@@ -169,7 +169,7 @@ public sealed class EmbeddingLookupTests
         for (int i = 0; i < output.Length; i++) Assert.Equal(expected[i], output[i], 1e-5f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_MultipleTokens_MatchesCpu()
     {
         const int vocabSize = 8, hiddenSize = 64, seqLen = 3;
@@ -186,7 +186,7 @@ public sealed class EmbeddingLookupTests
         for (int i = 0; i < output.Length; i++) Assert.Equal(expected[i], output[i], 1e-5f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ZeroWeights_OutputIsZero()
     {
         // scale = 1.0, all int8 weights = 0 → output must be all zeros

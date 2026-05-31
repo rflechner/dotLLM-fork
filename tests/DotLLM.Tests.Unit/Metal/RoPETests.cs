@@ -11,7 +11,7 @@ public sealed class RoPETests
 {
     // ── Norm variant (Llama/Mistral) ─────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NormVariant_MatchesCpu()
     {
         const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
@@ -43,7 +43,7 @@ public sealed class RoPETests
 
     // ── NeoX variant (Qwen/Phi) ──────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NeoXVariant_MatchesCpu()
     {
         const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
@@ -75,7 +75,7 @@ public sealed class RoPETests
 
     // ── Position 0 = identité ────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void PositionZero_VecUnchanged()
     {
         // cos(0) = 1, sin(0) = 0 → rotation = identité
@@ -96,7 +96,7 @@ public sealed class RoPETests
 
     // ── GQA : numKvHeads < numHeads ──────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_KvHeadsRotatedCorrectly()
     {
         const int seqLen = 2, numHeads = 4, numKvHeads = 1, headDim = 8;
@@ -128,7 +128,7 @@ public sealed class RoPETests
 
     // ── ropeDim partiel ──────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void PartialRopeDim_MatchesCpu()
     {
         const int seqLen = 2, numHeads = 2, numKvHeads = 1, headDim = 8, ropeDim = 4;
@@ -160,7 +160,7 @@ public sealed class RoPETests
 
     // ── Large input (Llama-like) ─────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeInput_MatchesCpu()
     {
         const int seqLen = 8, numHeads = 32, numKvHeads = 8, headDim = 128;
@@ -227,7 +227,7 @@ public sealed class RoPEF16Tests
 
     // ── Norm variant (Llama/Mistral) ─────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NormVariant_MatchesCpu()
     {
         const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
@@ -251,7 +251,7 @@ public sealed class RoPEF16Tests
 
     // ── NeoX variant (Qwen/Phi) ──────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void NeoXVariant_MatchesCpu()
     {
         const int seqLen = 4, numHeads = 2, numKvHeads = 2, headDim = 8;
@@ -275,7 +275,7 @@ public sealed class RoPEF16Tests
 
     // ── Position 0 = identité ────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void PositionZero_VecUnchanged()
     {
         // cos(0) = 1, sin(0) = 0 → rotation = identité
@@ -296,7 +296,7 @@ public sealed class RoPEF16Tests
 
     // ── GQA : numKvHeads < numHeads ──────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_KvHeadsRotatedCorrectly()
     {
         const int seqLen = 2, numHeads = 4, numKvHeads = 1, headDim = 8;
@@ -320,7 +320,7 @@ public sealed class RoPEF16Tests
 
     // ── ropeDim partiel ──────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void PartialRopeDim_MatchesCpu()
     {
         const int seqLen = 2, numHeads = 2, numKvHeads = 1, headDim = 8, ropeDim = 4;

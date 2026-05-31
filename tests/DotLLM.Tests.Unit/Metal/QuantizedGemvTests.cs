@@ -138,7 +138,7 @@ public sealed class QuantizedGemvTests
 
     // ── Tests ─────────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_SingleRow_MatchesCpu()
     {
         const int n = 1, k = 32;
@@ -153,7 +153,7 @@ public sealed class QuantizedGemvTests
         AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_MultipleRows_MatchesCpu()
     {
         const int n = 8, k = 128;
@@ -168,7 +168,7 @@ public sealed class QuantizedGemvTests
         AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_LargerMatrix_MatchesCpu()
     {
         // Realistic hidden-dim size to stress the grid-stride loop.
@@ -184,7 +184,7 @@ public sealed class QuantizedGemvTests
         AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ZeroWeights_OutputIsZero()
     {
         const int n = 4, k = 64;
@@ -207,7 +207,7 @@ public sealed class QuantizedGemvTests
         foreach (float v in y) Assert.Equal(0f, v, 1e-6f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ZeroInput_OutputIsZero()
     {
         const int n = 4, k = 64;
@@ -243,7 +243,7 @@ public sealed class QuantizedGemvQ8_0Tests
         return buf;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpu()
     {
         const int n = 1, k = 32;
@@ -258,7 +258,7 @@ public sealed class QuantizedGemvQ8_0Tests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleRows_MatchesCpu()
     {
         const int n = 8, k = 128;
@@ -273,7 +273,7 @@ public sealed class QuantizedGemvQ8_0Tests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroInput_OutputIsZero()
     {
         const int n = 4, k = 64;
@@ -311,7 +311,7 @@ public sealed class QuantizedGemvQ5_0Tests
         return buf;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpu()
     {
         const int n = 1, k = 32;
@@ -326,7 +326,7 @@ public sealed class QuantizedGemvQ5_0Tests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleRows_MatchesCpu()
     {
         const int n = 8, k = 128;
@@ -341,7 +341,7 @@ public sealed class QuantizedGemvQ5_0Tests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroInput_OutputIsZero()
     {
         const int n = 4, k = 64;
@@ -379,7 +379,7 @@ public sealed class QuantizedGemvQ4_KTests
         return buf;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpu()
     {
         const int n = 1, k = 256;
@@ -394,7 +394,7 @@ public sealed class QuantizedGemvQ4_KTests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleRows_MatchesCpu()
     {
         const int n = 4, k = 512;
@@ -409,7 +409,7 @@ public sealed class QuantizedGemvQ4_KTests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroInput_OutputIsZero()
     {
         const int n = 2, k = 256;
@@ -447,7 +447,7 @@ public sealed class QuantizedGemvQ5_KTests
         return buf;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpu()
     {
         const int n = 1, k = 256;
@@ -462,7 +462,7 @@ public sealed class QuantizedGemvQ5_KTests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleRows_MatchesCpu()
     {
         const int n = 4, k = 512;
@@ -477,7 +477,7 @@ public sealed class QuantizedGemvQ5_KTests
         GemvF16Helpers.AssertEqual(expected, y, 5);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroInput_OutputIsZero()
     {
         const int n = 2, k = 256;
@@ -519,7 +519,7 @@ public sealed class QuantizedGemvQ6_KTests
         return buf;
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SingleRow_MatchesCpu()
     {
         const int n = 1, k = 256;
@@ -534,7 +534,7 @@ public sealed class QuantizedGemvQ6_KTests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleRows_MatchesCpu()
     {
         const int n = 4, k = 512;
@@ -549,7 +549,7 @@ public sealed class QuantizedGemvQ6_KTests
         GemvF16Helpers.AssertEqual(expected, y);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ZeroInput_OutputIsZero()
     {
         const int n = 2, k = 256;

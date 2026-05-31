@@ -60,7 +60,7 @@ public sealed class AttentionF32Tests
 
     // ── Basic MHA tests ───────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_SingleToken_SingleHead_MatchesCpu()
     {
         // Simplest possible case: seqQ=1, seqKv=1, 1 head.
@@ -74,7 +74,7 @@ public sealed class AttentionF32Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_SingleToken_MultiHead_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -86,7 +86,7 @@ public sealed class AttentionF32Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_MultiToken_Prefill_MatchesCpu()
     {
         // Prefill: seqQ == seqKv, positionOffset = 0.
@@ -99,7 +99,7 @@ public sealed class AttentionF32Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MHA_Decode_WithCachedContext_MatchesCpu()
     {
         // Decode step: seqQ=1, seqKv=cached+1, positionOffset=cached.
@@ -115,7 +115,7 @@ public sealed class AttentionF32Tests
 
     // ── GQA tests ─────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_4to1_MatchesCpu()
     {
         // 4 query heads sharing 1 KV head (MQA).
@@ -128,7 +128,7 @@ public sealed class AttentionF32Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void GQA_8to2_MatchesCpu()
     {
         // 8 query heads, 2 KV heads — each KV head shared by 4 query heads.
@@ -143,7 +143,7 @@ public sealed class AttentionF32Tests
 
     // ── Sliding window tests ───────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void SlidingWindow_LimitsAttendedTokens_MatchesCpu()
     {
         // CUDA/Metal convention: mask if (pos_q - tkv > sliding_window)
@@ -174,7 +174,7 @@ public sealed class AttentionF32Tests
 
     // ── Large head dim — stresses the grid-stride loops ──────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void LargeHeadDim_128_MatchesCpu()
     {
         var (cpu, gpu) = Run(
@@ -186,7 +186,7 @@ public sealed class AttentionF32Tests
         AssertEqual(cpu, gpu);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeSeqKv_StressesKvTiling_MatchesCpu()
     {
         // seqKv = 512 > TILE_KV = 256: exercises the tile loop.
@@ -201,7 +201,7 @@ public sealed class AttentionF32Tests
 
     // ── Edge cases ────────────────────────────────────────────────────────────
 
-    [Fact]
+    [MetalTestFact]
     public void AllMasked_SingleTokenSees_OnlySelf()
     {
         // seqQ=1, seqKv=4, positionOffset=0 → only token 0 is visible, tokens 1-3 masked.

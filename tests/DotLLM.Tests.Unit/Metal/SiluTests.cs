@@ -6,7 +6,7 @@ namespace DotLLM.Tests.Unit.Metal;
 
 public sealed class SiluTests
 {
-    [Fact]
+    [MetalTestFact]
     public void Zero_ProducesZero()
     {
         float[] input = [0f];
@@ -18,7 +18,7 @@ public sealed class SiluTests
         Assert.Equal(0f, result[0], 1e-6f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void One_MatchesExpected()
     {
         // SiLU(1) = 1 * sigmoid(1) = 1 / (1 + e^-1) ≈ 0.7311
@@ -31,7 +31,7 @@ public sealed class SiluTests
         Assert.Equal(0.7311f, result[0], 1e-3f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeNegative_NearZero()
     {
         // SiLU(-10) = -10 * sigmoid(-10) ≈ -10 * 0.0000454 ≈ -0.000454
@@ -44,7 +44,7 @@ public sealed class SiluTests
         Assert.True(MathF.Abs(result[0]) < 0.001f, $"SiLU(-10) = {result[0]}, expected near zero");
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargePositive_ApproachesInput()
     {
         // SiLU(10) = 10 * sigmoid(10) ≈ 10 * 0.99995 ≈ 9.9995
@@ -57,7 +57,7 @@ public sealed class SiluTests
         Assert.Equal(10f, result[0], 0.01f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void MultipleValues_AllCorrect()
     {
         float[] input = [-5f, -1f, 0f, 1f, 5f];
@@ -72,7 +72,7 @@ public sealed class SiluTests
             Assert.Equal(expected[i], result[i], 1e-5f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ScalarMatchesTensorPrimitives()
     {
         var rng = new Random(42);

@@ -6,7 +6,7 @@ namespace DotLLM.Tests.Unit.Metal;
 
 public sealed class AddF32Tests
 {
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchExpected()
     {
         using var ctx = new MetalContext();
@@ -19,14 +19,14 @@ public sealed class AddF32Tests
         Assert.Equal([11.0f, 22.0f, 33.0f, 44.0f], result);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyArrays_ReturnsSilently()
     {
         using var ctx = new MetalContext();
         AddF32.Execute(ctx, [], [], []);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void InputLengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -34,7 +34,7 @@ public sealed class AddF32Tests
             AddF32.Execute(ctx, [1.0f, 2.0f], [1.0f], new float[2]));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void ResultTooSmall_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -42,7 +42,7 @@ public sealed class AddF32Tests
             AddF32.Execute(ctx, [1.0f, 2.0f], [3.0f, 4.0f], new float[1]));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeVector_MatchExpected()
     {
         using var ctx = new MetalContext();
@@ -64,7 +64,7 @@ public sealed class AddF16Tests
     private static Half[] H(params float[] values) =>
         Array.ConvertAll(values, v => (Half)v);
 
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchExpected()
     {
         using var ctx  = new MetalContext();
@@ -78,7 +78,7 @@ public sealed class AddF16Tests
         Assert.Equal(expected, result);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void OddLength_HandlesTrailingElement()
     {
         // n=5: half2 covers elements [0,1] and [2,3]; element 4 is the odd tail
@@ -93,14 +93,14 @@ public sealed class AddF16Tests
         Assert.Equal(expected, result);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyArrays_ReturnsSilently()
     {
         using var ctx = new MetalContext();
         AddF16.Execute(ctx, [], [], []);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void InputLengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -108,7 +108,7 @@ public sealed class AddF16Tests
             AddF16.Execute(ctx, [H(1.0f)[0], H(2.0f)[0]], [H(1.0f)[0]], new Half[2]));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeVector_EvenLength_MatchExpected()
     {
         using var ctx = new MetalContext();
@@ -127,7 +127,7 @@ public sealed class AddF16Tests
 
 public sealed class AddF32F16Tests
 {
-    [Fact]
+    [MetalTestFact]
     public void KnownValues_MatchExpected()
     {
         using var ctx  = new MetalContext();
@@ -140,7 +140,7 @@ public sealed class AddF32F16Tests
         Assert.Equal([11.0f, 22.0f, 33.0f, 44.0f], result);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void FP16_PartialPrecision_IsAccounted()
     {
         // Values chosen so that Half conversion is exact (powers of 2 / small integers)
@@ -156,14 +156,14 @@ public sealed class AddF32F16Tests
             Assert.Equal(expected[i], result[i], 1e-3f);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void EmptyArrays_ReturnsSilently()
     {
         using var ctx = new MetalContext();
         AddF32F16.Execute(ctx, [], [], []);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void InputLengthMismatch_ThrowsArgumentException()
     {
         using var ctx = new MetalContext();
@@ -171,7 +171,7 @@ public sealed class AddF32F16Tests
             AddF32F16.Execute(ctx, [1.0f, 2.0f], [(Half)1.0f], new float[2]));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void LargeVector_MatchExpected()
     {
         using var ctx = new MetalContext();

@@ -94,7 +94,7 @@ public sealed class QuantKvTests
     // For inputs in [-1, 1], max_abs ≤ 1, so tol = 1/127 ≈ 0.008.
     private const float Q8_0Tol = 0.01f;
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_SingleBlock_MatchesCpu()
     {
         const int totalBlocks = 1, n = totalBlocks * 32;
@@ -109,7 +109,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ8_0(cpuBytes, n), DequantQ8_0(gpuBytes, n), Q8_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_MultipleBlocks_MatchesCpu()
     {
         const int totalBlocks = 8, n = totalBlocks * 32;
@@ -124,7 +124,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ8_0(cpuBytes, n), DequantQ8_0(gpuBytes, n), Q8_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ManyBlocks_MatchesCpu()
     {
         const int totalBlocks = 128, n = totalBlocks * 32;
@@ -139,7 +139,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ8_0(cpuBytes, n), DequantQ8_0(gpuBytes, n), Q8_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q8_0_ZeroInput_ScaleZeroAndWeightsZero()
     {
         const int totalBlocks = 4, n = totalBlocks * 32;
@@ -159,7 +159,7 @@ public sealed class QuantKvTests
     // For inputs in [-1, 1], max_abs ≤ 1, so tol = 1/7 ≈ 0.143.
     private const float Q4_0Tol = 0.15f;
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_SingleBlock_MatchesCpu()
     {
         const int totalBlocks = 1, n = totalBlocks * 32;
@@ -174,7 +174,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ4_0(cpuBytes, n), DequantQ4_0(gpuBytes, n), Q4_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_MultipleBlocks_MatchesCpu()
     {
         const int totalBlocks = 8, n = totalBlocks * 32;
@@ -189,7 +189,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ4_0(cpuBytes, n), DequantQ4_0(gpuBytes, n), Q4_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_ManyBlocks_MatchesCpu()
     {
         const int totalBlocks = 128, n = totalBlocks * 32;
@@ -204,7 +204,7 @@ public sealed class QuantKvTests
         AssertEqual(DequantQ4_0(cpuBytes, n), DequantQ4_0(gpuBytes, n), Q4_0Tol);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Q4_0_ZeroInput_ScaleZeroAndWeightsCentered()
     {
         const int totalBlocks = 4, n = totalBlocks * 32;

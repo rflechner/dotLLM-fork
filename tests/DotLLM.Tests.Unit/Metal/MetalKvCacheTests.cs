@@ -6,7 +6,7 @@ namespace DotLLM.Tests.Unit.Metal;
 
 public sealed class MetalKvCacheTests
 {
-    [Fact]
+    [MetalTestFact]
     public void Initialization_SetsCorrectProperties()
     {
         using var ctx = new MetalContext();
@@ -25,7 +25,7 @@ public sealed class MetalKvCacheTests
         Assert.Equal(expectedBytes, cache.AllocatedBytes);
     }
 
-    [Fact]
+    [MetalTestFact]
     public unsafe void Update_IncreasesCurrentLength()
     {
         using var ctx = new MetalContext();
@@ -86,7 +86,7 @@ public sealed class MetalKvCacheTests
         }
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Rollback_DecreasesCurrentLength()
     {
         using var ctx = new MetalContext();
@@ -99,7 +99,7 @@ public sealed class MetalKvCacheTests
         Assert.Equal(2, cache.CurrentLength);
     }
 
-    [Fact]
+    [MetalTestFact]
     public void SetCurrentLength_Throws_WhenOutOfBounds()
     {
         using var ctx = new MetalContext();
@@ -108,7 +108,7 @@ public sealed class MetalKvCacheTests
         Assert.Throws<ArgumentOutOfRangeException>(() => cache.SetCurrentLength(11));
     }
 
-    [Fact]
+    [MetalTestFact]
     public void Rollback_Throws_WhenIncreasingLength()
     {
         using var ctx = new MetalContext();
