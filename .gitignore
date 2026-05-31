@@ -432,5 +432,6 @@ tests/.models/
 
 *.xcuserstate
 xcuserdata/
+native/metal/dotllm_metal.xcodeproj/xcuserdata/
 .idea/
 .claude/settings.local.json
