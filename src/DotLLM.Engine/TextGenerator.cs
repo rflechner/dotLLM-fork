@@ -602,7 +602,7 @@ public sealed class TextGenerator
                 {
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                    string text = detok.TakeDelta();
+                    string text = detok.TakeDelta(flushPending: true);
                     yield return new GenerationToken(firstTokenId, text, fr, timings, firstLogprobInfo);
                 }
                 yield break;
@@ -611,7 +611,7 @@ public sealed class TextGenerator
             // Yield first token — check if it's also the last (maxTokens == 1)
             {
                 bool firstIsLast = maxTokens <= 1;
-                string text = detok.TakeDelta();
+                string text = detok.TakeDelta(flushPending: firstIsLast);
                 if (firstIsLast)
                 {
                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
@@ -684,7 +684,7 @@ public sealed class TextGenerator
                                     specAccepted++;
                                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                                     var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount, specDrafted, specAccepted);
-                                    string text = detok.TakeDelta();
+                                    string text = detok.TakeDelta(flushPending: true);
                                     yield return new GenerationToken(tokenId, text, fr, timings);
                                 }
                                 shouldBreak = true;
@@ -696,7 +696,7 @@ public sealed class TextGenerator
                             // Yield each accepted token
                             {
                                 bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                                string text = detok.TakeDelta();
+                                string text = detok.TakeDelta(flushPending: isLastStep && i == result.AcceptedCount - 1);
                                 if (isLastStep && i == result.AcceptedCount - 1)
                                 {
                                     StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
@@ -773,7 +773,7 @@ public sealed class TextGenerator
                         {
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            string text = detok.TakeDelta();
+                            string text = detok.TakeDelta(flushPending: true);
                             yield return new GenerationToken(nextTokenId, text, fr, timings, tokenLogprob);
                         }
                         yield break;
@@ -782,15 +782,16 @@ public sealed class TextGenerator
                     // Yield token — attach finish reason if this is the last iteration
                     {
                         bool isLastStep = (step + 1 >= maxTokens) || (promptLen + step >= cacheSize);
-                        string text = detok.TakeDelta();
                         if (isLastStep)
                         {
                             StoreInPrefixCache(kvCache, promptIds, generatedIds, ref ownsKvCache);
                             var timings = BuildTimings(promptLen, generatedIds.Count, prefillTicks, decodeTicks, samplerTicks, kvBytes, cachedTokenCount);
-                            yield return new GenerationToken(nextTokenId, text, FinishReason.Length, timings, tokenLogprob);
+                            string finalText = detok.TakeDelta(flushPending: true);
+                            yield return new GenerationToken(nextTokenId, finalText, FinishReason.Length, timings, tokenLogprob);
                             yield break;
                         }
-                        yield return new GenerationToken(nextTokenId, text, null, Logprobs: tokenLogprob);
+                        string deltaText = detok.TakeDelta();
+                        yield return new GenerationToken(nextTokenId, deltaText, null, Logprobs: tokenLogprob);
                     }
                 }
             }

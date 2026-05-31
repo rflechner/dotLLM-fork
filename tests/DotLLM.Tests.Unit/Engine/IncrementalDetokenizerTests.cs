@@ -160,6 +160,45 @@ public sealed class IncrementalDetokenizerTests
     }
 
     [Fact]
+    public void TakeDelta_HoldsIncompleteUtf8UntilEmojiCompletes()
+    {
+        // "🙂" is UTF-8 F0 9F 99 82. Streaming must not emit U+FFFD while
+        // only a prefix of the byte sequence has been generated.
+        var tok = BuildByteFallbackVocab();
+        int byteF0 = 2 + 0xF0;
+        int byte9F = 2 + 0x9F;
+        int byte99 = 2 + 0x99;
+        int byte82 = 2 + 0x82;
+
+        var detok = new IncrementalDetokenizer(tok);
+
+        detok.Append(byteF0);
+        Assert.Equal(string.Empty, detok.TakeDelta());
+
+        detok.Append(byte9F);
+        Assert.Equal(string.Empty, detok.TakeDelta());
+
+        detok.Append(byte99);
+        Assert.Equal(string.Empty, detok.TakeDelta());
+
+        detok.Append(byte82);
+        Assert.Equal("\ud83d\ude42", detok.TakeDelta());
+    }
+
+    [Fact]
+    public void TakeDelta_CanFlushTrailingReplacementAtEnd()
+    {
+        var tok = BuildByteFallbackVocab();
+        int byteF0 = 2 + 0xF0;
+
+        var detok = new IncrementalDetokenizer(tok);
+        detok.Append(byteF0);
+
+        Assert.Equal(string.Empty, detok.TakeDelta());
+        Assert.Equal("\ufffd", detok.TakeDelta(flushPending: true));
+    }
+
+    [Fact]
     public void ByteFallbackTokens_LongRun_MatchesBulkDecode()
     {
         var tok = BuildByteFallbackVocab();

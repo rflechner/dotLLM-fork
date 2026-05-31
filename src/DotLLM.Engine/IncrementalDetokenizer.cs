@@ -119,13 +119,17 @@ internal sealed class IncrementalDetokenizer
     }
 
     /// <summary>
-    /// Returns the text appended since the previous call to <see cref="TakeDelta"/>
-    /// (or since construction). Advances the baseline to the current length.
+    /// Returns the stable text appended since the previous call to <see cref="TakeDelta"/>
+    /// (or since construction). Advances the baseline only past text that is safe to stream.
     /// </summary>
-    public string TakeDelta()
+    /// <param name="flushPending">
+    /// When true, also emits the trailing replacement character that may represent an
+    /// incomplete UTF-8 sequence. Use on the final generation chunk.
+    /// </param>
+    public string TakeDelta(bool flushPending = false)
     {
-        int total = Length;
-        if (total == _deltaBaseline)
+        int total = flushPending ? Length : StableLength;
+        if (total <= _deltaBaseline)
             return string.Empty;
 
         string delta = SliceRange(_deltaBaseline, total);
@@ -172,5 +176,25 @@ internal sealed class IncrementalDetokenizer
                 s.self._committed.CopyTo(s.start, span[..s.fromCommitted], s.fromCommitted);
                 s.self._windowText.AsSpan(0, s.fromWindow).CopyTo(span[s.fromCommitted..]);
             });
+    }
+
+    private int StableLength => _committed.Length + GetStableWindowLength();
+
+    private int GetStableWindowLength()
+    {
+        int len = _windowText.Length;
+
+        // Encoding.UTF8.GetString uses U+FFFD for incomplete byte sequences. While
+        // streaming, keep a trailing replacement char in the window so a later byte can
+        // still turn it into the intended code point, such as an emoji.
+        while (len > 0 && _windowText[len - 1] == '\ufffd')
+            len--;
+
+        // Defensive guard against exposing half of a UTF-16 surrogate pair if a custom
+        // tokenizer ever returns one at a chunk boundary.
+        if (len > 0 && char.IsHighSurrogate(_windowText[len - 1]))
+            len--;
+
+        return len;
     }
 }
