@@ -431,6 +431,6 @@ tests/.models/
 *.metallib
 
 *.xcuserstate
-
+xcuserdata/
 .idea/
 .claude/settings.local.json
