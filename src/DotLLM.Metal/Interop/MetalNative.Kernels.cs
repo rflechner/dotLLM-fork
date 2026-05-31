@@ -513,27 +513,6 @@ internal static partial class MetalNative
         float   alpha,
         float   beta);
 
-    /// <summary>
-    /// FP16 GEMM via simdgroup_matrix kernel (Apple's tensor-core-equivalent).
-    /// Same signature as <see cref="GemmF16"/> but returns -1 when the requested
-    /// mode is unsupported by the v1 kernel (transposeA must be 0, transposeB
-    /// must be 1, alpha must be 1, beta must be 0, and M, N, K must all be
-    /// multiples of 8). Callers should fall back to <see cref="GemmF16"/> on -1.
-    /// </summary>
-    [LibraryImport(LibName, EntryPoint = "dotllm_metal_gemm_f16_smm")]
-    internal static unsafe partial int GemmF16Smm(
-        nint    ctx,
-        ushort* a,
-        ushort* b,
-        ushort* c,
-        int     m,
-        int     n,
-        int     k,
-        int     transposeA,
-        int     transposeB,
-        float   alpha,
-        float   beta);
-
     /// <summary>FP32 GEMM via MPSMatrixMultiplication: C = alpha * op(A) * op(B) + beta * C.</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_gemm_f32")]
     internal static unsafe partial int GemmF32(

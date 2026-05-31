@@ -51,27 +51,34 @@ The hand-ported quantized GEMV kernels (`quantized_gemv_q8_0`, `q5_0`, `q4_k`,
 for **prefill**, where `seqLen` may be hundreds or thousands of tokens and
 every Q/K/V/O and FFN projection becomes a true matrix × matrix multiply.
 
-A second class of GEMM is needed for prefill, and writing a competitive
-matmul from scratch is a multi-week task.
+A second class of GEMM is therefore needed for prefill.
 
 ### Why `MPSMatrixMultiplication`
 
-Apple ships a heavily-tuned matrix-multiplication primitive as part of
-**Metal Performance Shaders** (MPS), the same framework that backs PyTorch
-on Apple Silicon. It is:
+FP16 and FP32 GEMM are served by **`MPSMatrixMultiplication`**, Apple's tuned
+matmul primitive from **Metal Performance Shaders** (the same framework that
+backs PyTorch on Apple Silicon). It is:
 
 - already optimised for every shipping Apple GPU generation,
 - maintained by Apple (we inherit improvements transparently),
 - callable directly from the Metal command-buffer encoder,
 - available in FP16 and FP32 variants out of the box.
 
-We expose it through two C entry points and a thin C# wrapper:
+> **Note** — an earlier iteration shipped a hand-written `simdgroup_matrix`
+> kernel (`gemm_f16_smm`) as a "fast path" for the LLM-projection mode.
+> Benchmarking on an M4 Max showed MPS to be ~1.5× faster at prefill (≈ 750 vs
+> ≈ 490 tok/s) while requiring zero maintenance, so the custom kernel was
+> removed. Decode is unaffected either way — it goes through the quantized
+> GEMV path, not GEMM. If a hand-tuned kernel is revisited later, it must beat
+> MPS on a real prefill before becoming the default.
+
+We expose MPS through two C entry points and a thin C# wrapper:
 
 ```
-native/metal/bridge.mm                 dotllm_metal_gemm_f16 / _f32
-native/metal/dotllm_metal.h            (declarations)
-src/DotLLM.Metal/Interop/MetalNative.cs  GemmF16 / GemmF32 P/Invoke
-src/DotLLM.Metal/Gemm.cs               public static class Gemm
+native/metal/bridge.mm                           dotllm_metal_gemm_f16 / _f32
+native/metal/dotllm_metal.h                      (declarations)
+src/DotLLM.Metal/Interop/MetalNative.Kernels.cs  GemmF16 / GemmF32 P/Invoke
+src/DotLLM.Metal/Kernels/Gemm.cs                 public static class Gemm
 ```
 
 ### Operation and layout convention
@@ -180,7 +187,7 @@ strategy for that is part of the next milestone (`MetalWeights`, below).
 
 ---
 
-## Phase 3 — MetalWeights (planned)
+## Phase 3 — MetalWeights
 
 `MetalWeights` is the GPU-side representation of every model parameter
 loaded from a GGUF file: per-layer Q/K/V/O and FFN matrices, RMSNorm
