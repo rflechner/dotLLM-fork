@@ -1274,7 +1274,7 @@ extern "C" int dotllm_metal_per_head_rmsnorm_f16(
         if (!ctx || !qk || !weight) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "per_head_rmsnorm_f32.metal", "per_head_rmsnorm_f16");
+            get_or_create_pipeline(ctx, "per_head_rmsnorm.metal", "per_head_rmsnorm_f16");
         if (!pipeline) return -3;
 
         // See per_head_rmsnorm_f32: cap 128 for head_dim-sized reductions.
