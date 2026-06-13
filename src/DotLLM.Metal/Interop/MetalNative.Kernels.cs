@@ -49,13 +49,6 @@ internal static partial class MetalNative
         int     rows,
         int     cols);
 
-    [LibraryImport(LibName, EntryPoint = "dotllm_metal_silu_f32")]
-    internal static unsafe partial int SiluF32(
-        nint ctx,
-        float* input,
-        float* result,
-        uint length);
-
     /// <summary>SwiGLU (FP32): result[i] = SiLU(gate[i]) * up[i]</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_swiglu_f32")]
     internal static unsafe partial int SwigluF32(

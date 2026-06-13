@@ -750,15 +750,6 @@ extern "C" int dotllm_metal_softmax_f16(
     }
 }
 
-extern "C" int dotllm_metal_silu_f32(
-    dotllm_metal_context* ctx,
-    const float* input,
-    float* result,
-    uint32_t length)
-{
-    return run_unary_f32_kernel(ctx, "silu.metal", "silu", input, result, length);
-}
-
 extern "C" int dotllm_metal_swiglu_f32(
     dotllm_metal_context* ctx,
     const float* gate,

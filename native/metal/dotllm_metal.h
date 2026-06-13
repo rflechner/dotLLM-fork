@@ -159,13 +159,6 @@ int dotllm_metal_softmax_f16(
     int32_t         rows,
     int32_t         cols);
 
-/// SiLU activation: result[i] = input[i] * sigmoid(input[i])
-int dotllm_metal_silu_f32(
-    dotllm_metal_context* ctx,
-    const float* input,
-    float* result,
-    uint32_t length);
-
 /// SwiGLU (FP32): result[i] = SiLU(gate[i]) * up[i]
 /// Port of swiglu_f32.cu::swiglu_f32
 int dotllm_metal_swiglu_f32(
