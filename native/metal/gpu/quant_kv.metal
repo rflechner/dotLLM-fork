@@ -1,19 +1,7 @@
+// ISO port of quant_kv.cu
+
 #include <metal_stdlib>
 using namespace metal;
-
-// ─────────────────────────────────────────────────────────────────────
-//  KV-cache quantization kernels: FP16 → Q8_0 and FP16 → Q4_0
-//  Direct port of quant_kv.cu.
-//  One thread per block of 32 elements.
-//
-//  CUDA → Metal mapping:
-//    blockIdx.x * blockDim.x + threadIdx.x  →  thread_position_in_grid
-//    __half2float(x)                         →  float(x)
-//    __float2half(x)                         →  half(x)
-//    __float2int_rn(x)                       →  int(round(x))
-//    max(a, min(b, v))                       →  clamp(v, a, b)
-//    reinterpret_cast<half*>(p)              →  (device half*)(p)
-// ─────────────────────────────────────────────────────────────────────
 
 // ── Q8_0: 34 bytes per 32 values ─────────────────────────────────────
 // struct block_q8_0 { half d; int8_t qs[32]; };
