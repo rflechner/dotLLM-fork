@@ -945,7 +945,7 @@ extern "C" int dotllm_metal_rope_f32(
         if (!ctx || !q || !k || !positions) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "RoPE.metal", "rope_f32");
+            get_or_create_pipeline(ctx, "rope_f32.metal", "rope_f32");
         if (!pipeline) return -3;
 
         int32_t half_rope     = rope_dim / 2;
@@ -1007,7 +1007,7 @@ extern "C" int dotllm_metal_rope_f16(
         if (!ctx || !q || !k || !positions) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "RoPE.metal", "rope_f16");
+            get_or_create_pipeline(ctx, "rope.metal", "rope_f16");
         if (!pipeline) return -3;
 
         int32_t half_rope     = rope_dim / 2;
