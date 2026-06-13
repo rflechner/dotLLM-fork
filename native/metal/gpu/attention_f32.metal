@@ -1,21 +1,4 @@
-// Tiled attention with FP32 Q/K/V/output and online softmax.
-// Direct port of attention_f32.cu.
-//
-// CUDA → Metal mapping:
-//   blockIdx.x                      → threadgroup_position_in_grid
-//   threadIdx.x                     → thread_position_in_threadgroup
-//   blockDim.x                      → threads_per_threadgroup
-//   warpSize (32)                   → 32 (simd_size on Apple Silicon)
-//   __shfl_down_sync + tree-reduce  → simd_max / simd_sum
-//       NOTE: simd_max/simd_sum return the result to ALL lanes in the simd
-//       group, unlike __shfl_down_sync which only gives the result to lane 0.
-//       The two-pass cross-warp reduction is otherwise identical.
-//   __syncthreads()                 → threadgroup_barrier(mem_flags::mem_threadgroup)
-//   extern __shared__ float smem[]  → threadgroup float* smem [[threadgroup(0)]]
-//       The caller sets the threadgroup memory size via
-//       setThreadgroupMemoryLength: (2*head_dim + TILE_KV + 8)*sizeof(float).
-//   -FLT_MAX                        → -MAXFLOAT (same IEEE 754 bit pattern)
-//   (size_t) pointer indexing       → (ulong) pointer indexing
+// ISO port of attention_f32.cu.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -35,12 +18,6 @@ kernel void attention_f32(
     constant int&       head_dim       [[buffer(8)]],
     constant int&       position_offset [[buffer(9)]],
     constant int&       sliding_window  [[buffer(10)]],
-    // Dynamic threadgroup memory — mirrors CUDA extern __shared__ float smem[].
-    // Layout (floats):
-    //   [0 .. head_dim)               q_shared
-    //   [head_dim .. head_dim+256)    score_tile   (TILE_KV = 256)
-    //   [head_dim+256 .. 2*head_dim+256) out_accum
-    //   [2*head_dim+256 .. +8)        warp_scratch (8 warps = 256/32)
     threadgroup float*  smem           [[threadgroup(0)]],
     uint block_id   [[threadgroup_position_in_grid]],
     uint thread_idx [[thread_position_in_threadgroup]],

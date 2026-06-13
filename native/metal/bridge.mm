@@ -1616,7 +1616,7 @@ static int run_attention_f16_with_kvcache(
         if (seq_kv <= 0) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "attention_f16.metal", "attention_f16");
+            get_or_create_pipeline(ctx, "attention.metal", "attention_f16");
         if (!pipeline) return -3;
 
         NSUInteger qBytes   = (NSUInteger)(seq_q * num_heads * head_dim) * sizeof(uint16_t);
@@ -1713,8 +1713,11 @@ static int run_attention_kernel(
         if (seq_q <= 0 || seq_kv <= 0 || num_heads <= 0 || num_kv_heads <= 0
             || head_dim <= 0 || num_heads % num_kv_heads != 0) return -10;
 
-        NSString* shaderFile = [NSString stringWithFormat:@"attention_%s.metal",
-                                (elemSize == sizeof(float)) ? "f32" : "f16"];
+        // 1:1 with the CUDA sources: attention_f16 lives in attention.metal
+        // (port of attention.cu), attention_f32 in attention_f32.metal.
+        NSString* shaderFile = (elemSize == sizeof(float))
+                             ? @"attention_f32.metal"
+                             : @"attention.metal";
         id<MTLComputePipelineState> pipeline =
             get_or_create_pipeline(ctx, shaderFile.UTF8String, functionName);
         if (!pipeline) return -3;

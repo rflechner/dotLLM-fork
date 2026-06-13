@@ -1,15 +1,4 @@
-// Tiled attention kernel: FP16 Q/K/V/output, FP32 accumulation, online softmax.
-// Direct port of attention.cu (attention_f16 kernel).
-//
-// Compared to attention_f32.metal, the only differences are:
-//   - Q/K/V/output buffers are device half* instead of device float*.
-//   - Q is loaded as float(q_vec[d])       — half→float on read.
-//   - K dot-product uses float(k_vec[d])   — half→float on read.
-//   - V accumulation uses float(v_vec[d])  — half→float on read.
-//   - Output written as half(out_accum[d] * sum_inv) — float→half on write.
-//
-// All reductions and accumulators remain in float32 for numerical stability.
-// CUDA → Metal mapping is identical to attention_f32.metal — see that file.
+// ISO port of attention.cu.
 
 #include <metal_stdlib>
 using namespace metal;
@@ -29,11 +18,6 @@ kernel void attention_f16(
     constant int&       head_dim       [[buffer(8)]],
     constant int&       position_offset [[buffer(9)]],
     constant int&       sliding_window  [[buffer(10)]],
-    // Dynamic threadgroup memory — same layout as attention_f32.metal:
-    //   [0 .. head_dim)                q_shared    (float, loaded from half Q)
-    //   [head_dim .. head_dim+256)     score_tile  (float, TILE_KV = 256)
-    //   [head_dim+256 .. 2*head_dim+256) out_accum (float)
-    //   [2*head_dim+256 .. +8)         warp_scratch (float, 8 warps)
     threadgroup float*  smem           [[threadgroup(0)]],
     uint block_id   [[threadgroup_position_in_grid]],
     uint thread_idx [[thread_position_in_threadgroup]],
