@@ -1,9 +1,4 @@
-// Softmax kernel for dotLLM.
-// Numerically stable: subtract max, exp, normalize.
-// One threadgroup per row, simd reduction. FP16 in/out, FP32 accumulation.
-// Two passes over input: exp results stored in output buffer during pass 2,
-// then normalized in-place in pass 3 (no re-read of input, no re-compute of exp).
-// Port of softmax.cu::softmax_f16
+// ISO port of softmax.cu.
 
 #include <metal_stdlib>
 using namespace metal;
