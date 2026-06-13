@@ -600,7 +600,7 @@ extern "C" int dotllm_metal_add_f32(
     float* result,
     uint32_t length)
 {
-    return run_binary_f32_kernel(ctx, "add.metal", "add_f32", a, b, result, length);
+    return run_binary_f32_kernel(ctx, "add_f32.metal", "add_f32", a, b, result, length);
 }
 
 extern "C" int dotllm_metal_add_f16(
@@ -660,7 +660,7 @@ extern "C" int dotllm_metal_add_f32_f16(
         if (!ctx || !a || !b || !result) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "add.metal", "add_f32_f16");
+            get_or_create_pipeline(ctx, "add_f32.metal", "add_f32_f16");
         if (!pipeline) return -3;
 
         NSUInteger bytesF32 = (NSUInteger)length * sizeof(float);
