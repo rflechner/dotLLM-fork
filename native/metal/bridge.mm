@@ -766,7 +766,7 @@ extern "C" int dotllm_metal_swiglu_f32(
     float* result,
     uint32_t length)
 {
-    return run_binary_f32_kernel(ctx, "swiglu.metal", "swiglu_f32", gate, up, result, length);
+    return run_binary_f32_kernel(ctx, "swiglu_f32.metal", "swiglu_f32", gate, up, result, length);
 }
 
 extern "C" int dotllm_metal_swiglu_f16(

@@ -1,28 +1,8 @@
-// Fused SwiGLU activation kernels for dotLLM.
-// out[i] = SiLU(gate[i]) * up[i]  where SiLU(x) = x * sigmoid(x) = x / (1 + exp(-x))
-// ISO port of swiglu_f32.cu (swiglu_f32) and swiglu.cu (swiglu_f16).
+// ISO port of swiglu.cu.
 
 #include <metal_stdlib>
 using namespace metal;
 
-// ── swiglu_f32 ────────────────────────────────────────────────────────────────
-// Port of swiglu_f32.cu::swiglu_f32
-kernel void swiglu_f32(
-    device const float* gate   [[buffer(0)]],
-    device const float* up     [[buffer(1)]],
-    device       float* output [[buffer(2)]],
-    constant uint&      length [[buffer(3)]],
-    uint idx [[thread_position_in_grid]])
-{
-    if (idx >= length) return;
-
-    float g = gate[idx];
-    output[idx] = (g / (1.0f + exp(-g))) * up[idx];
-}
-
-// ── swiglu_f16 ────────────────────────────────────────────────────────────────
-// Vectorized: half2 loads/stores, FP32 computation for sigmoid precision.
-// Port of swiglu.cu::swiglu_f16
 kernel void swiglu_f16(
     device const half* gate   [[buffer(0)]],
     device const half* up     [[buffer(1)]],
