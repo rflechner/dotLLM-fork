@@ -1065,7 +1065,7 @@ extern "C" int dotllm_metal_rmsnorm_f32(
         if (!ctx || !input || !weight || !output) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32");
+            get_or_create_pipeline(ctx, "rmsnorm_f32.metal", "rmsnorm_f32");
         if (!pipeline) return -3;
 
         // Threadgroup size: scaled to hidden dim. The kernel is reduction-heavy
@@ -1323,7 +1323,7 @@ extern "C" int dotllm_metal_rmsnorm_f32in_f16out(
         if (!ctx || !input || !weight || !output) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "rmsnorm.metal", "rmsnorm_f32in_f16out");
+            get_or_create_pipeline(ctx, "rmsnorm_f32in.metal", "rmsnorm_f32in_f16out");
         if (!pipeline) return -3;
 
         // Reduction over hidden dim; allow up to 512 threads for better occupancy.
