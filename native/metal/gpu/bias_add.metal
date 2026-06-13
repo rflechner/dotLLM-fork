@@ -1,28 +1,8 @@
-// Bias addition kernels for dotLLM.
-// ISO port of bias_add_f32.cu (bias_add_f32) and bias_add.cu (bias_add_f16).
+// ISO port of bias_add.cu.
 
 #include <metal_stdlib>
 using namespace metal;
 
-// ── bias_add_f32 ──────────────────────────────────────────────────────────────
-// output_f32[t, i] += float(bias_f16[i])  for t in [0, seq_len)
-// Port of bias_add_f32.cu::bias_add_f32
-// Note: bias is stored as FP16 (matches CUDA source).
-kernel void bias_add_f32(
-    device float*       output  [[buffer(0)]],
-    device const half*  bias    [[buffer(1)]],
-    constant uint&      dim     [[buffer(2)]],
-    constant uint&      seq_len [[buffer(3)]],
-    uint idx [[thread_position_in_grid]])
-{
-    if (idx < dim * seq_len)
-        output[idx] += float(bias[idx % dim]);
-}
-
-// ── bias_add_f16 ──────────────────────────────────────────────────────────────
-// output_f16[t, i] += bias_f16[i]  for t in [0, seq_len)
-// Vectorized: half2 packed operations process 2 elements per thread.
-// Port of bias_add.cu::bias_add_f16
 kernel void bias_add_f16(
     device half*       output  [[buffer(0)]],
     device const half* bias    [[buffer(1)]],

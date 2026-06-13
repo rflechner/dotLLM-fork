@@ -826,7 +826,7 @@ extern "C" int dotllm_metal_bias_add_f32(
         if (!ctx || !output || !bias) return -10;
 
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "bias_add.metal", "bias_add_f32");
+            get_or_create_pipeline(ctx, "bias_add_f32.metal", "bias_add_f32");
         if (!pipeline) return -3;
 
         uint32_t total = dim * seq_len;
