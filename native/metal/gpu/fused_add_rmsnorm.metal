@@ -1,3 +1,5 @@
+// ISO port of fused_add_rmsnorm.cu.
+
 #include <metal_stdlib>
 using namespace metal;
 
@@ -20,7 +22,14 @@ kernel void fused_add_rmsnorm_f16(
     device half* out_row = output + (size_t)row * n;
     
     // Pass 1: compute sum in FP32, write sum back to residual (FP16),
-    // and accumulate sum-of-squares for RMS — vectorized when n % 4 == 0.
+    // and accumulate sum-of-squares for RMS.
+    // `(n & 3) == 0` ⟺ n is a multiple of 4: take the vectorized half4 path
+    // (4 elements per load, n/4 iterations; the half4 cast also needs the
+    // 8-byte-aligned rows that a multiple-of-4 n guarantees). Otherwise n/4
+    // iterations would skip the trailing 1-3 elements and a half4 read could
+    // spill past the row → fall back to the scalar loop. LLM hidden sizes are
+    // always multiples of 4, so the fast path runs in practice; the scalar
+    // branch is defensive correctness.
     float sum_sq = 0.0f;
     if ((n & 3) == 0) {
         float4 acc4 = float4(0.0f);
