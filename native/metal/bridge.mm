@@ -694,16 +694,6 @@ extern "C" int dotllm_metal_add_f32_f16(
     }
 }
 
-extern "C" int dotllm_metal_multiply_f32(
-    dotllm_metal_context* ctx,
-    const float* a,
-    const float* b,
-    float* result,
-    uint32_t length)
-{
-    return run_binary_f32_kernel(ctx, "multiply.metal", "multiply_f32", a, b, result, length);
-}
-
 extern "C" int dotllm_metal_softmax_f16(
     dotllm_metal_context* ctx,
     const uint16_t* input,

@@ -31,15 +31,6 @@ internal static partial class MetalNative
         float*  result,
         uint length);
 
-    /// <summary>Element-wise multiplication: result[i] = a[i] * b[i]</summary>
-    [LibraryImport(LibName, EntryPoint = "dotllm_metal_multiply_f32")]
-    internal static unsafe partial int MultiplyF32(
-        nint ctx,
-        float* a,
-        float* b,
-        float* result,
-        uint length);
-
     /// <summary>Numerically stable softmax (FP16 I/O). One threadgroup per row.</summary>
     [LibraryImport(LibName, EntryPoint = "dotllm_metal_softmax_f16")]
     internal static unsafe partial int SoftmaxF16(

@@ -141,14 +141,6 @@ int dotllm_metal_add_f32_f16(
     float*          result,
     uint32_t        length);
 
-/// Element-wise multiplication: result[i] = a[i] * b[i]
-int dotllm_metal_multiply_f32(
-    dotllm_metal_context* ctx,
-    const float* a,
-    const float* b,
-    float* result,
-    uint32_t length);
-
 /// Numerically stable softmax, one threadgroup per row. FP16 I/O, FP32 accumulation.
 /// input/output layout: [rows, cols] — row-major.
 /// Port of softmax.cu::softmax_f16
