@@ -1446,8 +1446,14 @@ static int run_embedding_kernel(
     @autoreleasepool {
         if (!ctx || !embed_table || !token_ids || !output) return -10;
 
+        // Source file is cosmetic (kernels live in the single metallib), but keep
+        // it honest: f32-out kernels are in embedding_f32out.metal, f16-out kernels
+        // in embedding.metal (port of embedding.cu).
+        const char* shaderFile = strstr(functionName, "_f32out")
+                               ? "embedding_f32out.metal"
+                               : "embedding.metal";
         id<MTLComputePipelineState> pipeline =
-            get_or_create_pipeline(ctx, "embedding_f32out.metal", functionName);
+            get_or_create_pipeline(ctx, shaderFile, functionName);
         if (!pipeline) return -3;
 
         // One threadgroup per token; threads copy/dequantize hidden_size elements.
