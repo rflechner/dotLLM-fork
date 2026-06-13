@@ -1,3 +1,5 @@
+// ISO port of convert.cu.
+
 #include <metal_stdlib>
 using namespace metal;
 
