@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-rm -R bin
+# delete bin folder and don't crash if not exists
+rm -R bin 2> /dev/null || true
+
 mkdir bin
+mkdir bin/gpu
 
 DYLIB="bin/libdotllmmetal.dylib"
 
@@ -20,15 +23,16 @@ clang++ \
 # Compile each .metal → .air, then link them all into a single dotllm_kernels.metallib.
 # This single archive is loaded once at context creation; no runtime MSL→AIR
 # compilation, no .metal source files needed at runtime.
-for metal_file in *.metal; do
+for metal_file in gpu/*.metal; do
     name="${metal_file%.metal}"
+    echo "founf metal file $metal_file"
     xcrun -sdk macosx metal -c "$metal_file" -o "bin/${name}.air"
 done
 
-xcrun -sdk macosx metallib bin/*.air -o bin/dotllm_kernels.metallib
+xcrun -sdk macosx metallib bin/gpu/*.air -o bin/dotllm_kernels.metallib
 
 # Per-shader .air intermediates are no longer needed once the archive is built.
-rm -f bin/*.air
+rm -f bin/gpu/*.air
 
 # ── Build summary ────────────────────────────────────────────────────────────
 echo
